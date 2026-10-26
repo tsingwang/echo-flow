@@ -46,7 +46,7 @@
         const root = document.documentElement;
         root.classList.add(theme + '-theme');
         root.style.colorScheme = theme;
-        root.style.backgroundColor = theme === 'dark' ? '#09090b' : '#ffffff';
+        root.style.backgroundColor = theme === 'dark' ? '#1c1b18' : '#f5f0e8';
       } catch (_) { }
     })();
   </script>
@@ -67,6 +67,7 @@
   <script src="assets/search.js" defer></script>
   <script src="assets/storage.js" defer></script>
   <script src="assets/resource-store.js" defer></script>
+  <script src="assets/collections.js" defer></script>
   <script src="assets/resources.js" defer></script>
 
   <!-- 主题切换逻辑 -->
@@ -103,7 +104,7 @@
             return '';
           }
         })();
-        const bg = computedBg || (theme === 'dark' ? '#09090b' : '#ffffff');
+        const bg = computedBg || (theme === 'dark' ? '#1c1b18' : '#f5f0e8');
         root.style.backgroundColor = bg;
         if (document.body) document.body.style.backgroundColor = bg;
         void root.offsetHeight;
@@ -176,28 +177,151 @@
       const lastBox = document.getElementById('lastSeen');
       const FAV_KEY = 'nce_favs';
       const RECENT_KEY = 'nce_recents';
-      const LIB = (window.NCE_IMPORT && NCE_IMPORT.LIB) || 'lib';
+      const collectionTabs = document.getElementById('collectionTabs');
+      const importCollection = document.getElementById('importCollection');
+      const createCollectionOpen = document.getElementById('createCollectionOpen');
+      let collections = [];
+      let currentBook = null;
       const toolbarEl = document.getElementById('libraryToolbar');
       const countEl = document.getElementById('libraryCount');
       const emptyEl = document.getElementById('libraryEmpty');
       const gridEl = document.getElementById('lessonsGrid');
+      const clearBtn = document.getElementById('clearLibraryBtn');
+      const clearDialog = document.getElementById('clearCollectionDialog');
+      const libraryStatus = document.getElementById('libraryStatus');
       let library = [];
+      let resourceBusy = false;
 
-      async function loadLibrary() {
-        try {
-          if (!window.NCE_RESOURCES) { library = []; return; }
-          const list = await NCE_RESOURCES.listLessons(LIB);
-          library = list.sort((a, b) => a.filename.localeCompare(b.filename, 'zh-Hans-CN', { numeric: true }));
-        } catch (_) { library = []; }
+      function setResourceBusy(busy) {
+        resourceBusy = busy;
+        ['clearLibraryBtn', 'importOpenBtn', 'emptyImportBtn',
+          'importFolderBtn', 'importFilesBtn', 'importZipBtn'].forEach(id => {
+          document.getElementById(id).disabled = busy || !currentBook;
+        });
+        createCollectionOpen.disabled = busy;
+        collectionTabs.querySelectorAll('button').forEach(tab => {
+          tab.disabled = busy;
+          tab.draggable = !busy;
+        });
       }
-      async function load() {
-        await loadLibrary();
+
+      function currentName() {
+        return collections.find(item => item.id === currentBook)?.name || '';
+      }
+
+      function confirmCleanup(name) {
+        document.getElementById('clearCollectionName').textContent = name;
+        clearDialog.returnValue = 'cancel';
+        return new Promise(resolve => {
+          clearDialog.showModal();
+          clearDialog.addEventListener('close', () => resolve(clearDialog.returnValue === 'clear'), { once: true });
+          document.getElementById('clearCollectionCancel').focus();
+        });
+      }
+
+      clearBtn.addEventListener('click', async () => {
+        if (resourceBusy) return;
+        if (!currentBook) {
+          libraryStatus.textContent = '请先创建合集。';
+          return;
+        }
+        const book = currentBook;
+        const label = `合集「${currentName()}」`;
+        setResourceBusy(true);
+        let confirmed = false;
+        let deleted = false;
+        try {
+          confirmed = await confirmCleanup(currentName());
+          if (!confirmed) return;
+          clearBtn.textContent = '正在清理…';
+          libraryStatus.textContent = '正在清理资源和学习记录…';
+          await NCE_RESOURCES.deleteCollection(book);
+          deleted = true;
+          await NCE_STORAGE.clearLearningHistory(book);
+          libraryStatus.textContent = `已删除${label}及其资源和学习记录，收藏与设置已保留。`;
+        } catch (error) {
+          console.error('清理数据失败：', error);
+          libraryStatus.textContent = deleted
+            ? `已删除${label}，但学习记录清理或同步未完成：${error.message || error}。`
+            : `清理${label}失败：${error.message || error}。`;
+        } finally {
+          try {
+            if (confirmed) await switchCollection();
+          } catch (error) {
+            libraryStatus.textContent += ' 刷新合集失败：' + (error.message || error);
+          } finally {
+            clearBtn.textContent = '清理';
+            setResourceBusy(false);
+            if (!confirmed) clearBtn.focus({ preventScroll: true });
+          }
+        }
+      });
+
+      async function load(book) {
+        const nextCollections = await NCE_RESOURCES.listCollections();
+        const requested = book || currentBook || decodeURIComponent(location.hash.slice(1)) ||
+          localStorage.getItem('nce_current_collection');
+        const selected = nextCollections.some(item => item.id === requested) ? requested : nextCollections[0]?.id || null;
+        const list = selected ? await NCE_RESOURCES.listLessons(selected) : [];
+        if (selected) localStorage.setItem('nce_current_collection', selected);
+        else localStorage.removeItem('nce_current_collection');
+        collections = nextCollections;
+        currentBook = selected;
+        NCE_COLLECTIONS.renderTabs(collectionTabs, collections, currentBook, resourceBusy);
+        importCollection.textContent = currentName();
+        library = list.sort((a, b) => a.filename.localeCompare(b.filename, 'zh-Hans-CN', { numeric: true }));
         render();
       }
+      async function switchCollection(book) {
+        await load(book);
+        history.replaceState(null, '', currentBook ? '#' + encodeURIComponent(currentBook) : location.pathname);
+      }
+      NCE_COLLECTIONS.bindTabs(collectionTabs, async book => {
+        if (resourceBusy) return;
+        setResourceBusy(true);
+        try {
+          libraryStatus.textContent = '';
+          await switchCollection(book);
+        } catch (error) {
+          libraryStatus.textContent = '切换合集失败：' + (error.message || error);
+        } finally { setResourceBusy(false); }
+      }, async (ids, moved) => {
+        if (resourceBusy) return;
+        setResourceBusy(true);
+        try {
+          await NCE_RESOURCES.reorderCollections(ids);
+          const byId = new Map(collections.map(item => [item.id, item]));
+          collections = ids.map(id => byId.get(id));
+          NCE_COLLECTIONS.renderTabs(collectionTabs, collections, currentBook, true);
+          libraryStatus.textContent = '合集顺序已保存。';
+        } catch (error) {
+          console.error('保存合集顺序失败：', error);
+          libraryStatus.textContent = '保存合集顺序失败：' + (error.message || error);
+        } finally {
+          setResourceBusy(false);
+          Array.from(collectionTabs.querySelectorAll('button'))
+            .find(tab => tab.dataset.collection === moved)?.focus({ preventScroll: true });
+        }
+      });
+      NCE_COLLECTIONS.bindCreateDialog(createCollectionOpen, async name => {
+        setResourceBusy(true);
+        try {
+          const collection = await NCE_RESOURCES.createCollection(name);
+          await switchCollection(collection.id);
+          libraryStatus.textContent = `已创建合集「${collection.name}」，可以导入资源了。`;
+        } finally { setResourceBusy(false); }
+      });
+      window.addEventListener('hashchange', async () => {
+        if (resourceBusy) return;
+        setResourceBusy(true);
+        try { await load(decodeURIComponent(location.hash.slice(1))); }
+        catch (error) { libraryStatus.textContent = '加载合集失败：' + (error.message || error); }
+        finally { setResourceBusy(false); }
+      });
       function getFavs() { try { return new Set(JSON.parse(localStorage.getItem(FAV_KEY) || '[]')); } catch (_) { return new Set(); } }
       function saveFavs(set) { try { localStorage.setItem(FAV_KEY, JSON.stringify(Array.from(set))); } catch (_) { } }
 
-      function lessonHref(lesson) { return `lesson.html#${lesson.book}/${lesson.filename}`; }
+      function lessonHref(lesson) { return `lesson.html#${encodeURIComponent(lesson.book)}/${encodeURIComponent(lesson.filename)}`; }
       function fmtTime(t) { t = Math.max(0, Math.floor(t || 0)); const m = Math.floor(t / 60); const s = t % 60; return `${m}:${String(s).padStart(2, '0')}`; }
       function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
@@ -223,7 +347,7 @@
         const favs = getFavs();
         const hasLessons = library.length > 0;
 
-        // 上次学习（在整个课程库中查找最近记录）
+        // 上次学习仅显示当前合集的最近记录。
         try {
           const recRaw = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]');
           const rec = recRaw.filter(x => typeof x?.id === 'string')
@@ -256,8 +380,14 @@
           }
         } catch (_) { }
 
-        if (toolbarEl) toolbarEl.hidden = !hasLessons;
+        if (toolbarEl) toolbarEl.hidden = !currentBook;
         if (emptyEl) emptyEl.hidden = hasLessons;
+        document.getElementById('emptyTitle').textContent = currentBook ? '当前合集还是空的' : '先创建一个合集';
+        document.getElementById('emptyDescription').textContent = currentBook
+          ? '导入 mp3 音频和同名 lrc 字幕，即可逐句点读。文件只保存在这台设备的浏览器里，不会上传。'
+          : '点击上方的 + 创建合集，再导入音频和字幕开始学习。';
+        document.getElementById('emptyImportBtn').hidden = !currentBook;
+        document.getElementById('emptyDropHint').hidden = !currentBook;
         if (countEl) countEl.textContent = hasLessons ? `${library.length} 课` : '';
         if (gridEl) gridEl.innerHTML = hasLessons ? library.map((l, i) => itemHTML(l, i, favs)).join('') : '';
       }
@@ -292,7 +422,13 @@
         if (!modal || !folderInput || !window.NCE_IMPORT) return;
 
         function openModal() {
+          if (resourceBusy) return;
+          if (!currentBook) {
+            libraryStatus.textContent = '请先点击 + 创建合集，再导入资源。';
+            return;
+          }
           setStatus('');
+          importCollection.textContent = currentName();
           modal.style.display = 'flex';
           document.body.style.overflow = 'hidden';
         }
@@ -310,24 +446,32 @@
 
         function setStatus(msg) { if (statusEl) statusEl.textContent = msg; }
         const onProgress = (d, t) => setStatus(`正在导入… ${d}/${t}`);
-        let importing = false;
-        async function run(promise) {
-          if (importing) return;
-          importing = true;
+        async function run(importResources) {
+          if (resourceBusy) return;
+          if (!currentBook) {
+            libraryStatus.textContent = '请先点击 + 创建合集，再导入资源。';
+            return;
+          }
+          const book = currentBook;
+          setResourceBusy(true);
+          libraryStatus.textContent = '';
           try {
             setStatus('正在导入…');
-            const res = await promise;
+            const res = await importResources(book);
             const parts = [`已导入 ${res.imported} 课`];
             if (res.skipped) parts.push(`跳过 ${res.skipped} 项`);
             setStatus(parts.join('，'));
-            if (res.errors && res.errors.length) console.warn('导入警告：', res.errors);
-            await load();
-            if (res.imported > 0) setTimeout(closeModal, 800);
+            if (res.errors && res.errors.length) {
+              setStatus(parts.join('，') + '。' + res.errors.join('；'));
+              console.warn('导入警告：', res.errors);
+            }
+            await load(book);
+            if (res.imported > 0 && !res.errors?.length) setTimeout(closeModal, 800);
           } catch (e) {
             setStatus('导入失败：' + (e.message || e));
             console.error(e);
           } finally {
-            importing = false;
+            setResourceBusy(false);
           }
         }
 
@@ -337,17 +481,20 @@
 
         folderInput.addEventListener('change', () => {
           if (!folderInput.files.length) return;
-          run(NCE_IMPORT.importFileList(folderInput.files, onProgress));
+          const files = Array.from(folderInput.files);
+          run(book => NCE_IMPORT.importFileList(files, onProgress, book));
           folderInput.value = '';
         });
         filesInput.addEventListener('change', () => {
           if (!filesInput.files.length) return;
-          run(NCE_IMPORT.importFileList(filesInput.files, onProgress));
+          const files = Array.from(filesInput.files);
+          run(book => NCE_IMPORT.importFileList(files, onProgress, book));
           filesInput.value = '';
         });
         zipInput.addEventListener('change', () => {
           if (!zipInput.files.length) return;
-          run(NCE_IMPORT.importZipFile(zipInput.files[0], onProgress));
+          const file = zipInput.files[0];
+          run(book => NCE_IMPORT.importZipFile(file, onProgress, book));
           zipInput.value = '';
         });
 
@@ -363,17 +510,22 @@
             emptyCard.classList.remove('dragover');
           }));
           emptyCard.addEventListener('drop', (e) => {
+            if (resourceBusy) return;
             const files = Array.from(e.dataTransfer?.files || []);
             if (!files.length) return;
             const zip = files.find(f => /\.zip$/i.test(f.name));
             openModal();
-            if (zip) run(NCE_IMPORT.importZipFile(zip, onProgress));
-            else run(NCE_IMPORT.importFileList(files, onProgress));
+            if (zip) run(book => NCE_IMPORT.importZipFile(zip, onProgress, book));
+            else run(book => NCE_IMPORT.importFileList(files, onProgress, book));
           });
         }
       })();
 
-      load();
+      setResourceBusy(true);
+      load().catch(error => {
+        console.error('加载合集失败：', error);
+        libraryStatus.textContent = '加载合集失败：' + (error.message || error);
+      }).finally(() => setResourceBusy(false));
     });
   </script>
 </head>
@@ -404,6 +556,10 @@
       <h1 id="bookTitle">EchoFlow</h1>
       <p class="subtitle">导入你的 mp3 + lrc，逐句点读、循环与跟读</p>
     </header>
+    <nav class="collection-bar" aria-label="合集">
+      <div id="collectionTabs" class="collection-tabs" role="tablist" aria-label="合集"></div>
+      <button type="button" id="createCollectionOpen" class="collection-add" aria-label="创建合集" title="创建合集" disabled>+</button>
+    </nav>
 
     <!-- Search Modal -->
     <div id="searchModal" class="search-overlay" hidden>
@@ -443,14 +599,18 @@
           <h2>课程库</h2>
           <span class="library-count" id="libraryCount"></span>
         </div>
-        <button type="button" class="btn-quiet" id="importOpenBtn">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
-            <line x1="12" y1="5" x2="12" y2="19"></line>
-            <line x1="5" y1="12" x2="19" y2="12"></line>
-          </svg>
-          导入
-        </button>
+        <div class="library-actions">
+          <button type="button" class="btn-quiet" id="clearLibraryBtn" disabled>清理</button>
+          <button type="button" class="btn-quiet" id="importOpenBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            导入
+          </button>
+        </div>
       </section>
+      <p class="library-status" id="libraryStatus" role="status" aria-live="polite"></p>
       <section class="section last-seen-section" id="lastSeenWrap" style="display:none">
         <div id="lastSeen"></div>
       </section>
@@ -461,32 +621,13 @@
             <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path>
           </svg>
         </div>
-        <h2>课程库还是空的</h2>
-        <p>导入 mp3 音频和同名 lrc 字幕，它们会变成可逐句点读的课程。<br>文件只保存在这台设备的浏览器里，不会上传。</p>
+        <h2 id="emptyTitle">先创建一个合集</h2>
+        <p id="emptyDescription">点击上方的 + 创建合集，再导入音频和字幕开始学习。</p>
         <button type="button" class="btn-primary" id="emptyImportBtn">导入资源</button>
-        <p class="empty-drop-hint">也可以把文件直接拖到这里</p>
+        <p class="empty-drop-hint" id="emptyDropHint">也可以把文件直接拖到这里</p>
       </section>
       <div class="lessons-grid" id="lessonsGrid"></div>
     </main>
-    <footer>
-      <p class="repo">
-        <a class="gh-link" href="https://github.com/luzhenhua/echo-flow" target="_blank" rel="noopener"
-          aria-label="GitHub repository">
-          <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-            <path
-              d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z">
-            </path>
-          </svg>
-        </a>
-      </p>
-      <p class="byline">本网站由 <a href="https://zhenhua.lu/" target="_blank" rel="noopener">卢振华</a> 开发与维护</p>
-      <p class="version"><a href="https://github.com/luzhenhua/echo-flow/releases" target="_blank" rel="noopener">版本
-          1.7.9</a><span id="pwaFooterInstall" class="pwa-footer-link" hidden> · <a href="#">安装应用</a></span></p>
-      <div class="footer-actions">
-        <a class="footer-btn" href="donate.html">捐助</a>
-        <a class="footer-btn" href="about.html">关于</a>
-      </div>
-    </footer>
   </div>
 
   <script>
@@ -551,7 +692,7 @@
       `;
       notification.querySelector('button').style.cssText = `
         background: var(--accent, #3b82f6);
-        color: #fff;
+        color: var(--on-accent, #fff);
         border: none;
         padding: 6px 14px;
         border-radius: 8px;
@@ -582,7 +723,6 @@
       const installBtn = document.getElementById('pwaInstall');
       const closeBtn = document.getElementById('pwaClose');
       const promptSub = document.getElementById('pwaPromptSub');
-      const footerInstall = document.getElementById('pwaFooterInstall');
       if (!el) return;
 
       // 检测 iOS Safari
@@ -600,8 +740,6 @@
         el.classList.add('show');
       };
       const hidePrompt = () => el.classList.remove('show');
-      const showFooterLink = () => { if (footerInstall && !isInstalled()) footerInstall.hidden = false; };
-      const hideFooterLink = () => { if (footerInstall) footerInstall.hidden = true; };
 
       // iOS 引导界面
       const showIOSGuide = () => {
@@ -624,12 +762,10 @@
         if (outcome === 'accepted') localStorage.setItem(INSTALLED_KEY, '1');
         deferredPrompt = null;
         hidePrompt();
-        hideFooterLink();
       };
 
       // iOS Safari: 延迟显示提示（与 Android 相同的初始界面）
       if (isIOSSafari && !isInstalled() && !isDismissed()) {
-        showFooterLink();
         setTimeout(showPrompt, 2500);
       }
 
@@ -637,21 +773,27 @@
       window.addEventListener('beforeinstallprompt', e => {
         e.preventDefault();
         deferredPrompt = e;
-        showFooterLink();
         setTimeout(showPrompt, 2500);
       });
 
       installBtn.addEventListener('click', doInstall);
-      if (footerInstall) {
-        footerInstall.querySelector('a').addEventListener('click', e => {
-          e.preventDefault();
-          showPrompt();
-        });
-      }
       closeBtn.addEventListener('click', () => { localStorage.setItem(DISMISS_KEY, Date.now()); hidePrompt(); });
-      window.addEventListener('appinstalled', () => { localStorage.setItem(INSTALLED_KEY, '1'); hidePrompt(); hideFooterLink(); });
+      window.addEventListener('appinstalled', () => { localStorage.setItem(INSTALLED_KEY, '1'); hidePrompt(); });
     })();
   </script>
+  <dialog id="clearCollectionDialog" class="collection-dialog"
+    aria-labelledby="clearCollectionTitle" aria-describedby="clearCollectionDescription clearCollectionWarning">
+    <form method="dialog">
+      <h2 class="modal-title" id="clearCollectionTitle">清理合集</h2>
+      <p class="modal-text" id="clearCollectionDescription">确定删除合集「<strong id="clearCollectionName"></strong>」及其中全部音频、字幕和学习记录？</p>
+      <p class="collection-clear-note">合集名称和 Tab 也会删除，其他合集不受影响。句子收藏、课文收藏与设置会保留，收藏文本仍可查看和合成朗读。</p>
+      <p class="collection-clear-note" id="clearCollectionWarning"><strong>此操作不可撤销。</strong>不会删除电脑上的原始文件。清理前请关闭其他学习页面，避免旧页面重新写入进度。</p>
+      <div class="collection-dialog-actions">
+        <button type="submit" class="btn-quiet" id="clearCollectionCancel" value="cancel" autofocus>取消</button>
+        <button type="submit" class="btn-quiet btn-danger" id="clearCollectionConfirm" value="clear">确认清理</button>
+      </div>
+    </form>
+  </dialog>
   <!-- Import Modal -->
   <div id="importModal" class="modal-overlay" style="display: none;">
     <div class="modal-card import-modal-card">
@@ -665,6 +807,7 @@
       </div>
       <h3 class="modal-title">导入资源</h3>
       <p class="modal-text">选择 mp3 音频和同名 lrc 字幕，配对后成为一课。文件只保存在本机浏览器。</p>
+      <p class="import-collection-hint">当前合集：<strong id="importCollection"></strong></p>
       <div class="import-options">
         <button type="button" class="import-option" id="importFolderBtn">
           <span class="import-option-icon" aria-hidden="true">

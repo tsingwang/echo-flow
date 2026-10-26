@@ -7,16 +7,13 @@
  *   2. 多选文件导入     <input type="file" multiple accept=".mp3,.lrc">
  *   3. zip 包导入       <input type="file" accept=".zip">（原生 DecompressionStream 解压，无第三方库）
  *
- * 模型：课程库平铺不分组。存储命名空间固定为 LIB（store 的 book 字段），
- *       key = `LIB/${basename}`；课名优先取 lrc 的 [ti:] 标签，否则用文件名。
+ * 模型：按合集 ID（store 的 book 字段）隔离，key = `${book}/${basename}`。
+ *       必须先创建合集；课名优先取 lrc 的 [ti:] 标签。
  *
  * 暴露为全局 window.NCE_IMPORT。
  */
 (function () {
   'use strict';
-
-  // 课程库命名空间（对用户不可见，仅作存储 key 与路由前缀）
-  var LIB = 'lib';
 
   // ---------- 原生 ZIP 读取（仅读取，支持 store(0) 与 deflate(8)） ----------
   async function unzip(arrayBuffer) {
@@ -130,9 +127,12 @@
    * onProgress(done, total, label)
    * 返回 { imported, skipped, errors:[] }
    */
-  async function importPairs(pairs, onProgress) {
+  async function importPairs(pairs, onProgress, book) {
     const store = window.NCE_RESOURCES;
     if (!store) throw new Error('资源存储未就绪');
+    if (!book) throw new Error('请先创建并选择合集');
+    const collections = await store.listCollections();
+    if (!collections.some(item => item.id === book)) throw new Error('目标合集不存在，请重新选择');
     let imported = 0;
     let skipped = 0;
     const errors = [];
@@ -141,7 +141,7 @@
       done++;
       try {
         if (!p.audio && !p.lrc) { skipped++; continue; }
-        const rec = { book: LIB, filename: p.basename, title: '' };
+        const rec = { book, filename: p.basename, title: '' };
         if (p.lrc) {
           rec.lrcText = await p.lrc.getText();
           rec.title = titleFromLrc(rec.lrcText);
@@ -149,7 +149,7 @@
         if (p.audio) rec.audioBlob = await p.audio.getBlob();
         if (!rec.title) rec.title = p.basename;
         // 若此前已导入过同名课（如先导 lrc 后补音频），合并而不是覆盖丢字段
-        const prev = await store.getLesson(LIB, p.basename);
+        const prev = await store.getLesson(book, p.basename);
         if (prev) {
           if (!rec.audioBlob && prev.audioBlob) rec.audioBlob = prev.audioBlob;
           if (!rec.lrcText && prev.lrcText) { rec.lrcText = prev.lrcText; rec.title = prev.title || rec.title; }
@@ -205,17 +205,17 @@
   }
 
   window.NCE_IMPORT = {
-    LIB,
     pairsFromFileList,
     pairsFromZip,
     importPairs,
-    async importFileList(fileList, onProgress) {
-      return importPairs(pairsFromFileList(fileList), onProgress);
+    async importFileList(fileList, onProgress, book) {
+      return importPairs(pairsFromFileList(fileList), onProgress, book);
     },
-    async importZipFile(file, onProgress) {
+    async importZipFile(file, onProgress, book) {
+      if (!book) throw new Error('请先创建并选择合集');
       const buf = await file.arrayBuffer();
       const pairs = await pairsFromZip(buf);
-      return importPairs(pairs, onProgress);
+      return importPairs(pairs, onProgress, book);
     }
   };
 })();

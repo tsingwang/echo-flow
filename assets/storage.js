@@ -6,12 +6,15 @@
   // 数据键清单（导出/导入的唯一来源）
   // --------------------------
   const DATA_FORMAT = 1;
-  const USER_DATA_KEYS = [
-    'nce_sentence_favs_v1', // 句子收藏
-    'nce_favs',             // 课文收藏
+  const LEARNING_HISTORY_KEYS = [
     'nce_recents',          // 最近播放
     'nce_lastpos',          // 播放位置
     'nce_revealed_sentences' // 已揭示句子（听读模式）
+  ];
+  const USER_DATA_KEYS = [
+    'nce_sentence_favs_v1', // 句子收藏
+    'nce_favs',             // 课文收藏
+    ...LEARNING_HISTORY_KEYS
   ];
   const SETTINGS_KEYS = [
     'readMode',             // 阅读模式
@@ -243,6 +246,28 @@
     });
   }
 
+  async function clearLearningHistory(book) {
+    // 显式空值也会写入同步包，避免服务端保留旧进度。
+    LEARNING_HISTORY_KEYS.forEach(key => {
+      let value = key === 'nce_recents' ? [] : {};
+      if (book) {
+        const previous = JSON.parse(localStorage.getItem(key) || JSON.stringify(value));
+        const belongs = id => typeof id === 'string' && id.startsWith(book + '/');
+        value = key === 'nce_recents'
+          ? previous.filter(item => !belongs(item.id))
+          : Object.fromEntries(Object.entries(previous).filter(([id]) => !belongs(id)));
+      }
+      localStorage.setItem(key, JSON.stringify(value));
+    });
+    const resume = sessionStorage.getItem('nce_resume');
+    if (!book || (resume && resume.startsWith(book + '/'))) {
+      ['nce_resume', 'nce_resume_play', 'nce_auto_next_played_lessons'].forEach(key => {
+        sessionStorage.removeItem(key);
+      });
+    }
+    await SYNC.pushNow({ strict: true });
+  }
+
   // --------------------------
   // 服务端同步（仅当探测到后端时启用；纯静态部署 / 无后端时完全不介入）
   // 流程：探测特征头 x-nce-storage → 按 meta.exportedAt 时间戳拉取（较新则应用并刷新一次）
@@ -306,18 +331,31 @@
       }
     }
 
-    async function pushNow() {
+    async function pushNow({ strict = false } = {}) {
       if (!backend) return;
       const pkg = buildPackage();
       const ts = Date.parse(pkg.meta.exportedAt) || Date.now();
       let body;
-      try { body = JSON.stringify(pkg); } catch (_) { return; }
-      if (body.length > MAX_BYTES) return;
+      try { body = JSON.stringify(pkg); } catch (error) {
+        if (strict) throw error;
+        return;
+      }
+      if (body.length > MAX_BYTES) {
+        if (strict) throw new Error('本地记录已清理，但同步数据超过大小限制');
+        return;
+      }
       try {
         const res = await fetch(API, { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body });
-        if (res.status === 401) { promptForToken(); return; }
+        if (res.status === 401) {
+          promptForToken();
+          if (strict) throw new Error('本地记录已清理，但同步需要有效令牌');
+          return;
+        }
+        if (!res.ok && strict) throw new Error(`本地记录已清理，但服务端同步失败（HTTP ${res.status}）`);
         if (res.ok) setLastSync(ts);
-      } catch (_) { }
+      } catch (error) {
+        if (strict) throw new Error('学习记录同步未完成：' + error.message);
+      }
     }
 
     function schedulePush() {
@@ -401,7 +439,7 @@
     KEYS: { USER_DATA: USER_DATA_KEYS, SETTINGS: SETTINGS_KEYS, TTS: TTS_KEYS, ALL: ALL_DATA_KEYS, JSON_SET: JSON_KEYS },
     get, set, remove, getJSON, setJSON,
     buildPackage, writePackage,
-    exportData, validateImportData, handleImportFile, bindDataControls,
+    exportData, validateImportData, handleImportFile, bindDataControls, clearLearningHistory,
     notify, SYNC
   };
 })();

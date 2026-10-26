@@ -39,9 +39,19 @@
 
   function getKeyDisplayName(key) {
     if (!key) return '?';
+    var combination = /^(Ctrl|Alt|Shift|Meta)\+(.+)$/.exec(key);
+    if (combination) return combination[1] + '+' + getKeyDisplayName(combination[2]);
     if (KEY_DISPLAY_NAMES[key]) return KEY_DISPLAY_NAMES[key];
     if (key.length === 1) return key.toUpperCase();
     return key;
+  }
+
+  function getShortcutKey(event) {
+    if (['Control', 'Alt', 'Shift', 'Meta'].includes(event.key)) return null;
+    return (event.ctrlKey ? 'Ctrl+' : '') +
+      (event.altKey ? 'Alt+' : '') +
+      (event.shiftKey ? 'Shift+' : '') +
+      (event.metaKey ? 'Meta+' : '') + event.key;
   }
 
   function findConflict(shortcuts, action, newKey) {
@@ -121,10 +131,12 @@
   }
 
   function formatTime(seconds) {
-    if (!isFinite(seconds) || seconds < 0) return '0:00';
-    var mins = Math.floor(seconds / 60);
-    var secs = Math.floor(seconds % 60);
-    return mins + ':' + String(secs).padStart(2, '0');
+    if (!isFinite(seconds) || seconds < 0) return '0:00.000';
+    var totalMs = Math.round(seconds * 1000);
+    var mins = Math.floor(totalMs / 60000);
+    var secs = Math.floor(totalMs / 1000) % 60;
+    var ms = totalMs % 1000;
+    return mins + ':' + String(secs).padStart(2, '0') + '.' + String(ms).padStart(3, '0');
   }
 
   function countWords(text) {
@@ -229,6 +241,7 @@
     hasCJK: hasCJK,
     KEY_DISPLAY_NAMES: KEY_DISPLAY_NAMES,
     getKeyDisplayName: getKeyDisplayName,
+    getShortcutKey: getShortcutKey,
     findConflict: findConflict,
     normalizeShadowRepeat: normalizeShadowRepeat,
     normalizeAutoStopCount: normalizeAutoStopCount,

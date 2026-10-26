@@ -7,7 +7,7 @@
   // 工具 & 解析
   // --------------------------
   const {
-    timeTagsToSeconds, hasCJK, KEY_DISPLAY_NAMES, getKeyDisplayName,
+    timeTagsToSeconds, hasCJK, KEY_DISPLAY_NAMES, getKeyDisplayName, getShortcutKey,
     findConflict, normalizeShadowRepeat, normalizeAutoStopCount,
     shouldSkipLine, findFirstContentIndex, formatTime,
     countWords, clamp, seekLooksOk
@@ -82,8 +82,10 @@
   const DEFAULT_SHORTCUTS = {
     playPause: { key: ' ', label: '播放 / 暂停', group: '播放控制' },
     replay: { key: 'r', label: '重播当前句', group: '播放控制' },
-    nextSentence: { key: 'ArrowRight', label: '下一句', group: '句子导航' },
     prevSentence: { key: 'ArrowLeft', label: '上一句', group: '句子导航' },
+    nextSentence: { key: 'ArrowRight', label: '下一句', group: '句子导航' },
+    prevLesson: { key: 'Ctrl+ArrowLeft', label: '上一课', group: '课程导航' },
+    nextLesson: { key: 'Ctrl+ArrowRight', label: '下一课', group: '课程导航' },
     volumeUp: { key: 'ArrowUp', label: '增加音量', group: '音量控制' },
     volumeDown: { key: 'ArrowDown', label: '减少音量', group: '音量控制' },
     toggleReveal: { key: 'v', label: '显示/隐藏当前句', group: '听读模式' },
@@ -99,8 +101,14 @@
         // 合并到默认配置
         const result = JSON.parse(JSON.stringify(DEFAULT_SHORTCUTS));
         for (const action of Object.keys(result)) {
-          if (parsed[action]) {
+          if (typeof parsed[action] === 'string' && parsed[action]) {
             result[action].key = parsed[action];
+          }
+        }
+        for (const action of Object.keys(result)) {
+          if (findConflict(result, action, result[action].key)) {
+            console.warn('已保存的快捷键与新默认键位冲突，已恢复默认快捷键');
+            return JSON.parse(JSON.stringify(DEFAULT_SHORTCUTS));
           }
         }
         return result;
@@ -174,6 +182,20 @@
     const subEl = qs('#lessonSub');
     const listEl = qs('#sentences');
     const audio = qs('#player');
+    audio.volume = 1;
+    try {
+      const savedVolume = localStorage.getItem('nce_volume');
+      if (savedVolume !== null) {
+        const volume = Number(savedVolume);
+        if (savedVolume.trim() && Number.isFinite(volume) && volume >= 0 && volume <= 1) {
+          audio.volume = volume;
+        } else {
+          console.warn('已保存的音量无效，使用默认音量');
+        }
+      }
+    } catch (error) {
+      console.warn('无法恢复音量设置', error);
+    }
     const backLink = qs('#backLink');
     const settingsBtn = qs('#settingsBtn');
     const settingsOverlay = qs('#settingsOverlay');
@@ -288,7 +310,6 @@
     let iosUnlocked = false;         // 是否已“解锁音频”
     let iosUnlockPauseTimer = 0;     // 解锁用的延迟 pause（可取消）
     let metadataReady = false;       // 是否已 loadedmetadata
-    let _userVolume = Math.max(0, Math.min(1, audio.volume || 1));
 
     // 音频 seek 兼容：当服务器不支持 Range 时，回退为 Blob URL（可在本地 http.server 正常点读）
     let audioBlobUrl = '';
@@ -1075,7 +1096,7 @@
 
     // 返回
     if (backLink) {
-      const fallback = `index.html#${book}`;
+      const fallback = `index.html#${encodeURIComponent(book)}`;
       backLink.setAttribute('href', fallback);
       backLink.addEventListener('click', (e) => {
         e.preventDefault();
@@ -1170,6 +1191,27 @@
       }
     }
 
+    let progressRaf = null;
+    function animateProgress() {
+      progressRaf = null;
+      updateProgress();
+      if (!audio.paused && !audio.ended) {
+        progressRaf = requestAnimationFrame(animateProgress);
+      }
+    }
+
+    function startProgressUpdates() {
+      if (progressRaf === null) animateProgress();
+    }
+
+    function stopProgressUpdates() {
+      if (progressRaf !== null) {
+        cancelAnimationFrame(progressRaf);
+        progressRaf = null;
+      }
+      updateProgress();
+    }
+
     // 进度条点击跳转
     if (progressBar) {
       progressBar.addEventListener('click', (e) => {
@@ -1186,16 +1228,23 @@
 
     // 监听audio事件更新UI
     audio.addEventListener('play', updatePlayPauseIcon);
+    audio.addEventListener('play', startProgressUpdates);
     audio.addEventListener('pause', updatePlayPauseIcon);
+    audio.addEventListener('pause', stopProgressUpdates);
+    audio.addEventListener('ended', stopProgressUpdates);
     audio.addEventListener('timeupdate', updateProgress);
+    audio.addEventListener('seeked', updateProgress);
+    audio.addEventListener('durationchange', updateProgress);
     audio.addEventListener('loadedmetadata', () => {
       updateProgress();
       updatePlayPauseIcon();
+      startProgressUpdates();
     });
 
     // 初始化播放器UI
     updateProgress();
     updatePlayPauseIcon();
+    startProgressUpdates();
 
     // 设置面板（沿用你的结构）
     let _prevFocus = null; let _trapHandler = null;
@@ -1314,7 +1363,8 @@
         return;
       }
 
-      const newKey = e.key;
+      const newKey = getShortcutKey(e);
+      if (!newKey) return;
 
       // 检查冲突
       const conflict = findConflict(currentShortcuts, editingAction, newKey);
@@ -1516,53 +1566,45 @@
     // --------------------------
     // 全局快捷键
     // --------------------------
-    // 音量提示UI
     let volumeToastTimer = 0;
     function showVolumeToast(volume) {
-      const percentage = Math.round(volume * 100);
       let toast = document.getElementById('volumeToast');
-
       if (!toast) {
         toast = document.createElement('div');
         toast.id = 'volumeToast';
         toast.style.cssText = `
-          position: fixed;
-          top: 50%;
-          left: 50%;
-          transform: translate(-50%, -50%);
-          background: var(--surface);
-          color: var(--text);
-          border: 1px solid var(--border);
-          border-radius: var(--radius);
-          padding: 20px 30px;
-          box-shadow: var(--shadow);
-          z-index: 2000;
-          backdrop-filter: saturate(120%) blur(10px);
-          font-size: 18px;
-          font-weight: 500;
-          min-width: 120px;
-          text-align: center;
-          opacity: 0;
-          transition: opacity 0.2s ease;
+          position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+          background: var(--surface); color: var(--text); border: 1px solid var(--border);
+          border-radius: var(--radius); padding: 20px 30px; box-shadow: var(--shadow);
+          z-index: 2000; backdrop-filter: saturate(120%) blur(10px);
+          font-size: 18px; font-weight: 500; min-width: 120px; text-align: center;
+          opacity: 0; transition: opacity 0.2s ease;
         `;
         document.body.appendChild(toast);
       }
-
-      toast.textContent = `音量 ${percentage}%`;
+      toast.textContent = `音量 ${Math.round(volume * 100)}%`;
       toast.style.opacity = '1';
-
       if (volumeToastTimer) clearTimeout(volumeToastTimer);
-      volumeToastTimer = setTimeout(() => {
-        toast.style.opacity = '0';
-      }, 1000);
+      volumeToastTimer = setTimeout(() => { toast.style.opacity = '0'; }, 1000);
+    }
+
+    function changeVolume(delta) {
+      const volume = Math.min(1, Math.max(0, Math.round((audio.volume + delta) * 100) / 100));
+      audio.volume = volume;
+      try {
+        localStorage.setItem('nce_volume', String(volume));
+      } catch (error) {
+        console.warn('无法保存音量设置', error);
+      }
+      showVolumeToast(audio.volume);
     }
 
     // 检查按键是否匹配快捷键
-    function matchesShortcut(eventKey, action) {
+    function matchesShortcut(event, action) {
       const shortcutKey = currentShortcuts[action]?.key;
       if (!shortcutKey) return false;
       // 不区分大小写比较
-      return eventKey.toLowerCase() === shortcutKey.toLowerCase();
+      return getShortcutKey(event)?.toLowerCase() === shortcutKey.toLowerCase();
     }
 
     document.addEventListener('keydown', (e) => {
@@ -1573,7 +1615,7 @@
       }
 
       // ? 键 - 打开/关闭快捷键帮助（固定键位，不可自定义）
-      if (e.key === '?' || (e.shiftKey && e.key === '/')) {
+      if (!e.ctrlKey && !e.altKey && !e.metaKey && (e.key === '?' || (e.shiftKey && e.key === '/'))) {
         e.preventDefault();
         if (shortcutsPanel && !shortcutsPanel.hidden) {
           closeShortcuts();
@@ -1583,28 +1625,27 @@
         return;
       }
 
-      // 音量增加
-      if (matchesShortcut(e.key, 'volumeUp')) {
+      if (matchesShortcut(e, 'prevLesson') || matchesShortcut(e, 'nextLesson')) {
         e.preventDefault();
-        const newVolume = Math.min(1, audio.volume + 0.1);
-        audio.volume = newVolume;
-        try { localStorage.setItem('nce_volume', newVolume); } catch (_) { }
-        showVolumeToast(newVolume);
+        const previous = matchesShortcut(e, 'prevLesson');
+        const href = previous ? prevLessonHref : nextLessonHref;
+        if (href) {
+          pauseForNavigation();
+          location.href = href;
+        } else {
+          showNotification(previous ? '没有上一课' : '没有下一课');
+        }
         return;
       }
 
-      // 音量减少
-      if (matchesShortcut(e.key, 'volumeDown')) {
+      if (matchesShortcut(e, 'volumeUp') || matchesShortcut(e, 'volumeDown')) {
         e.preventDefault();
-        const newVolume = Math.max(0, audio.volume - 0.1);
-        audio.volume = newVolume;
-        try { localStorage.setItem('nce_volume', newVolume); } catch (_) { }
-        showVolumeToast(newVolume);
+        changeVolume(matchesShortcut(e, 'volumeUp') ? 0.1 : -0.1);
         return;
       }
 
       // 播放/暂停
-      if (matchesShortcut(e.key, 'playPause')) {
+      if (matchesShortcut(e, 'playPause')) {
         e.preventDefault();
         if (audio.paused) {
           if (readMode === 'shadow') {
@@ -1658,7 +1699,7 @@
       }
 
       // 下一句
-      if (matchesShortcut(e.key, 'nextSentence')) {
+      if (matchesShortcut(e, 'nextSentence')) {
         e.preventDefault();
         const startIdx = readMode === 'shadow' ? shadowStartIndex : firstContentIndex;
         const nextIdx = idx < 0 ? startIdx : Math.min(idx + 1, items.length - 1);
@@ -1669,7 +1710,7 @@
       }
 
       // 上一句
-      if (matchesShortcut(e.key, 'prevSentence')) {
+      if (matchesShortcut(e, 'prevSentence')) {
         e.preventDefault();
         const startIdx = readMode === 'shadow' ? shadowStartIndex : firstContentIndex;
         const prevIdx = idx < 0 ? startIdx : Math.max(idx - 1, 0);
@@ -1680,7 +1721,7 @@
       }
 
       // 重播当前句
-      if (matchesShortcut(e.key, 'replay')) {
+      if (matchesShortcut(e, 'replay')) {
         e.preventDefault();
         if (idx >= 0 && idx < items.length) {
           playSegment(idx, { manual: true });
@@ -1693,7 +1734,7 @@
       }
 
       // 切换当前句显示/隐藏（听读模式）
-      if (matchesShortcut(e.key, 'toggleReveal')) {
+      if (matchesShortcut(e, 'toggleReveal')) {
         e.preventDefault();
         if (readMode === 'listen' && idx >= 0 && idx < items.length) {
           toggleSentenceReveal(idx);
@@ -1989,7 +2030,6 @@
       try {
         const url = await getAudioBlobUrl();
         const keepRate = audio.playbackRate || 1;
-        const keepVol = audio.volume;
         const keepMuted = audio.muted;
 
         metadataReady = false;
@@ -1998,7 +2038,6 @@
         await ensureMetadata();
 
         try { audio.playbackRate = keepRate; } catch (_) { }
-        try { audio.volume = keepVol; } catch (_) { }
         try { audio.muted = keepMuted; } catch (_) { }
 
         usingBlobSrc = true;
@@ -2460,7 +2499,7 @@
         listEl.innerHTML =
           '<div class="resource-missing" style="padding:32px 16px;text-align:center;color:var(--muted,#888);line-height:1.9">' +
           '本课的音频 / 课文尚未导入。<br>本工具不提供任何教材内容，请导入你合法拥有的 mp3 + lrc 资源。<br><br>' +
-          '<a href="index.html" style="display:inline-block;background:var(--accent,#6366f1);color:#fff;text-decoration:none;padding:10px 20px;border-radius:10px;font-weight:600">去导入资源</a>' +
+          '<a href="index.html" style="display:inline-block;background:var(--accent,#6366f1);color:var(--on-accent,#fff);text-decoration:none;padding:10px 20px;border-radius:10px;font-weight:600">去导入资源</a>' +
           '</div>';
       }
     }
@@ -2518,14 +2557,6 @@
     // --------------------------
     // 启动：装载音频/LRC + 断点恢复
     // --------------------------
-    // 恢复保存的音量
-    try {
-      const savedVolume = parseFloat(localStorage.getItem('nce_volume'));
-      if (!isNaN(savedVolume) && savedVolume >= 0 && savedVolume <= 1) {
-        audio.volume = savedVolume;
-      }
-    } catch (_) { }
-
     // 重要：iOS 上尽早设定 preload，有助于更快拿到 metadata
     try { audio.preload = 'auto'; } catch (_) { }
     // 音频来自用户导入的本地资源（IndexedDB），以 Blob URL 装载；缺失则提示导入。

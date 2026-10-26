@@ -3,7 +3,7 @@
  * 缓存策略：核心文件缓存优先。音频/字幕由用户导入并存于 IndexedDB，不经 SW。
  */
 
-const CACHE_NAME = 'echoflow-v2.1.0-byo';
+const CACHE_NAME = 'echoflow-v2.2.6-collection-order';
 
 // 核心静态资源（预缓存）
 const PRECACHE_ASSETS = [
@@ -12,7 +12,6 @@ const PRECACHE_ASSETS = [
   './lesson.html',
   './favorites.html',
   './book.html',
-  './about.html',
   './manifest.json',
   './favicon.ico',
   './assets/styles.css',
@@ -23,6 +22,7 @@ const PRECACHE_ASSETS = [
   './assets/search.js',
   './assets/storage.js',
   './assets/resource-store.js',
+  './assets/collections.js',
   './assets/resources.js',
   './icons/icon-192x192.png',
   './icons/icon-512x512.png',

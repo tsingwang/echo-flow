@@ -5,8 +5,8 @@
  *
  * 记录结构（object store "lessons"，keyPath "id"）：
  *   {
- *     id: `${book}/${filename}`,   // book 为固定命名空间 "lib"（课程库平铺不分组）
- *     book: "lib",
+ *     id: `${book}/${filename}`,   // book 为用户创建的合集 ID
+ *     book: "book-...",
  *     filename: "01 Morning Dialogue",
  *     title: "Morning Dialogue",   // 取自 lrc [ti:]，否则为文件名
  *     audioBlob: Blob,             // audio/mpeg
@@ -19,9 +19,10 @@
 (function () {
   'use strict';
 
-  const DB_NAME = 'echoflow-resources';
+  const DB_NAME = 'echoflow-collections';
   const DB_VERSION = 1;
   const STORE = 'lessons';
+  const COLLECTIONS = 'collections';
 
   let dbPromise = null;
 
@@ -29,6 +30,7 @@
     if (dbPromise) return dbPromise;
     dbPromise = new Promise((resolve, reject) => {
       let req;
+      let blocked = false;
       try {
         req = indexedDB.open(DB_NAME, DB_VERSION);
       } catch (e) {
@@ -41,9 +43,27 @@
           const os = db.createObjectStore(STORE, { keyPath: 'id' });
           os.createIndex('book', 'book', { unique: false });
         }
+        if (!db.objectStoreNames.contains(COLLECTIONS)) {
+          db.createObjectStore(COLLECTIONS, { keyPath: 'id' });
+        }
       };
-      req.onsuccess = () => resolve(req.result);
+      req.onsuccess = () => {
+        if (blocked) { req.result.close(); return; }
+        req.result.onversionchange = () => {
+          req.result.close();
+          dbPromise = null;
+        };
+        resolve(req.result);
+      };
       req.onerror = () => reject(req.error);
+      req.onblocked = () => {
+        blocked = true;
+        reject(new Error('请关闭其他 EchoFlow 页面后重试，以升级合集存储'));
+      };
+    });
+    dbPromise = dbPromise.catch(error => {
+      dbPromise = null;
+      throw error;
     });
     return dbPromise;
   }
@@ -59,6 +79,78 @@
     });
   }
 
+  function transactionDone(transaction) {
+    return new Promise((resolve, reject) => {
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = () => reject(transaction.error || new Error('资源存储事务已中止'));
+      transaction.onerror = () => reject(transaction.error || new Error('资源存储事务失败'));
+    });
+  }
+
+  function sortCollections(collections) {
+    return collections.sort((a, b) =>
+      (a.order ?? Infinity) - (b.order ?? Infinity) ||
+      a.createdAt - b.createdAt || a.name.localeCompare(b.name, 'zh-Hans-CN'));
+  }
+
+  async function listCollections() {
+    const db = await openDB();
+    const collections = await reqToPromise(db.transaction(COLLECTIONS, 'readonly').objectStore(COLLECTIONS).getAll());
+    return sortCollections(collections);
+  }
+
+  async function reorderCollections(ids) {
+    if (!Array.isArray(ids) || new Set(ids).size !== ids.length) {
+      throw new Error('合集排序无效');
+    }
+    const db = await openDB();
+    const transaction = db.transaction(COLLECTIONS, 'readwrite');
+    const done = transactionDone(transaction);
+    const store = transaction.objectStore(COLLECTIONS);
+    let invalid = false;
+    const request = store.getAll();
+    request.onsuccess = () => {
+      const collections = new Map(request.result.map(item => [item.id, item]));
+      if (collections.size !== ids.length || ids.some(id => !collections.has(id))) {
+        invalid = true;
+        transaction.abort();
+        return;
+      }
+      ids.forEach((id, order) => store.put({ ...collections.get(id), order }));
+    };
+    try {
+      await done;
+    } catch (error) {
+      if (invalid) throw new Error('合集列表已变化，请刷新后重新排序');
+      throw error;
+    }
+  }
+
+  async function createCollection(name) {
+    name = String(name || '').trim();
+    if (!name || name.length > 80) throw new Error('合集名称须为 1–80 个字符');
+    const db = await openDB();
+    const transaction = db.transaction(COLLECTIONS, 'readwrite');
+    const done = transactionDone(transaction);
+    const store = transaction.objectStore(COLLECTIONS);
+    let collection;
+    const request = store.getAll();
+    request.onsuccess = () => {
+      if (request.result.some(item => item.name === name)) return;
+      const existing = sortCollections(request.result);
+      existing.forEach((item, order) => {
+        if (item.order !== order) store.put({ ...item, order });
+      });
+      const id = 'book-' + Array.from(crypto.getRandomValues(new Uint32Array(4)),
+        value => value.toString(16).padStart(8, '0')).join('');
+      collection = { id, name, createdAt: Date.now(), order: existing.length };
+      store.add(collection);
+    };
+    await done;
+    if (!collection) throw new Error('已存在同名合集，请直接切换');
+    return collection;
+  }
+
   function makeId(book, filename) {
     return `${book}/${filename}`;
   }
@@ -68,12 +160,30 @@
     if (!record || !record.book || !record.filename) {
       throw new Error('putLesson 需要 book 与 filename');
     }
-    const store = await tx('readwrite');
+    const db = await openDB();
+    const transaction = db.transaction([STORE, COLLECTIONS], 'readwrite');
+    const store = transaction.objectStore(STORE);
     const full = Object.assign(
       { id: makeId(record.book, record.filename), importedAt: Date.now() },
       record
     );
-    await reqToPromise(store.put(full));
+    const done = transactionDone(transaction);
+    let missingCollection = false;
+    const request = transaction.objectStore(COLLECTIONS).get(record.book);
+    request.onsuccess = () => {
+      if (!request.result) {
+        missingCollection = true;
+        transaction.abort();
+        return;
+      }
+      store.put(full);
+    };
+    try {
+      await done;
+    } catch (error) {
+      if (missingCollection) throw new Error('请先创建并选择合集');
+      throw error;
+    }
     return full.id;
   }
 
@@ -98,7 +208,7 @@
    */
   async function listLessons(book) {
     const store = await tx('readonly');
-    const all = await reqToPromise(store.getAll());
+    const all = await reqToPromise(book ? store.index('book').getAll(book) : store.getAll());
     return all
       .filter((r) => !book || r.book === book)
       .map((r) => ({
@@ -125,7 +235,26 @@
 
   async function clearAll() {
     const store = await tx('readwrite');
-    await reqToPromise(store.clear());
+    const done = transactionDone(store.transaction);
+    store.clear();
+    await done;
+  }
+
+  async function deleteCollection(book) {
+    if (!book) throw new Error('请选择需要清理的合集');
+    const db = await openDB();
+    const transaction = db.transaction([STORE, COLLECTIONS], 'readwrite');
+    const store = transaction.objectStore(STORE);
+    const done = transactionDone(transaction);
+    transaction.objectStore(COLLECTIONS).delete(book);
+    const request = store.index('book').openCursor(book);
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      cursor.delete();
+      cursor.continue();
+    };
+    await done;
   }
 
   window.NCE_RESOURCES = {
@@ -136,6 +265,10 @@
     count,
     deleteLesson,
     clearAll,
+    deleteCollection,
+    listCollections,
+    reorderCollections,
+    createCollection,
     makeId
   };
 })();
