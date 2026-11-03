@@ -1,6 +1,6 @@
 /**
  * EchoFlow · resources.js
- * 用户自带资源导入：把本地的 mp3 + lrc 文件配对后存入 IndexedDB（NCE_RESOURCES）。
+ * 用户自带资源导入与字幕导出：把本地的 mp3 + lrc 文件配对后存入 IndexedDB（NCE_RESOURCES）。
  *
  * 三种导入方式：
  *   1. 文件夹批量导入   <input type="file" webkitdirectory>
@@ -123,7 +123,7 @@
 
   // ---------- 入库 ----------
   /**
-   * pairs: [{ basename, audio:{getBlob}, lrc:{getText} }]
+   * pairs: [{ basename, audio:{getBlob}, lrc:{path?, getText} }]
    * onProgress(done, total, label)
    * 返回 { imported, skipped, errors:[] }
    */
@@ -144,6 +144,7 @@
         const rec = { book, filename: p.basename, title: '' };
         if (p.lrc) {
           rec.lrcText = await p.lrc.getText();
+          rec.lrcFilename = p.lrc.path ? p.lrc.path.slice(p.lrc.path.lastIndexOf('/') + 1) : `${p.basename}.lrc`;
           rec.title = titleFromLrc(rec.lrcText);
         }
         if (p.audio) rec.audioBlob = await p.audio.getBlob();
@@ -152,7 +153,11 @@
         const prev = await store.getLesson(book, p.basename);
         if (prev) {
           if (!rec.audioBlob && prev.audioBlob) rec.audioBlob = prev.audioBlob;
-          if (!rec.lrcText && prev.lrcText) { rec.lrcText = prev.lrcText; rec.title = prev.title || rec.title; }
+          if (!p.lrc && typeof prev.lrcText === 'string') {
+            rec.lrcText = prev.lrcText;
+            rec.lrcFilename = prev.lrcFilename;
+            rec.title = prev.title || rec.title;
+          }
         }
         await store.putLesson(rec);
         imported++;
@@ -204,10 +209,103 @@
     return pairByBasename(files);
   }
 
+  const CRC32_TABLE = Uint32Array.from({ length: 256 }, (_, value) => {
+    for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ ((value & 1) ? 0xedb88320 : 0);
+    return value >>> 0;
+  });
+
+  function createLrcZip(files) {
+    if (files.length >= 0xffff) throw new Error('字幕文件过多，超出 ZIP 格式限制');
+    const encoder = new TextEncoder();
+    const localParts = [];
+    const centralParts = [];
+    let offset = 0;
+    let centralSize = 0;
+    for (const file of files) {
+      const name = encoder.encode(file.filename);
+      const data = encoder.encode(file.lrcText);
+      if (name.length > 0xffff || data.length >= 0xffffffff ||
+        offset + 30 + name.length + data.length >= 0xffffffff) {
+        throw new Error('字幕大小超出 ZIP 格式限制');
+      }
+      let crc = 0xffffffff;
+      for (const byte of data) crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ byte) & 0xff];
+      crc = (crc ^ 0xffffffff) >>> 0;
+
+      const local = new Uint8Array(30);
+      const header = new DataView(local.buffer);
+      header.setUint32(0, 0x04034b50, true);
+      header.setUint16(4, 20, true);
+      header.setUint16(6, 0x0800, true); // UTF-8 文件名，内容采用 ZIP store 模式。
+      header.setUint16(12, 0x0021, true); // DOS 日期：1980-01-01。
+      header.setUint32(14, crc, true);
+      header.setUint32(18, data.length, true);
+      header.setUint32(22, data.length, true);
+      header.setUint16(26, name.length, true);
+      localParts.push(local, name, data);
+
+      const central = new Uint8Array(46);
+      const entry = new DataView(central.buffer);
+      entry.setUint32(0, 0x02014b50, true);
+      entry.setUint16(4, 20, true);
+      entry.setUint16(6, 20, true);
+      entry.setUint16(8, 0x0800, true);
+      entry.setUint16(14, 0x0021, true);
+      entry.setUint32(16, crc, true);
+      entry.setUint32(20, data.length, true);
+      entry.setUint32(24, data.length, true);
+      entry.setUint16(28, name.length, true);
+      entry.setUint32(42, offset, true);
+      centralParts.push(central, name);
+      offset += local.length + name.length + data.length;
+      centralSize += central.length + name.length;
+    }
+    if (offset + centralSize + 22 >= 0xffffffff) throw new Error('字幕大小超出 ZIP 格式限制');
+    const end = new Uint8Array(22);
+    const directory = new DataView(end.buffer);
+    directory.setUint32(0, 0x06054b50, true);
+    directory.setUint16(8, files.length, true);
+    directory.setUint16(10, files.length, true);
+    directory.setUint32(12, centralSize, true);
+    directory.setUint32(16, offset, true);
+    return new Blob([...localParts, ...centralParts, end], { type: 'application/zip' });
+  }
+
+  async function exportCollectionLrc(book) {
+    const store = window.NCE_RESOURCES;
+    if (!store) throw new Error('资源存储未就绪');
+    if (!book) throw new Error('请先创建并选择合集');
+    const collections = await store.listCollections();
+    const collection = collections.find(item => item.id === book);
+    if (!collection) throw new Error('目标合集不存在，请重新选择');
+    const files = await store.listLrcFiles(book);
+    if (!files.length) throw new Error('当前合集没有可导出的 LRC 字幕');
+    for (const file of files) {
+      if (!file.filename || /[/\\\0]/.test(file.filename) || !/\.lrc$/i.test(file.filename)) {
+        throw new Error('字幕文件名无效：' + file.filename);
+      }
+    }
+    const blob = createLrcZip(files);
+    const name = (collection.name || book).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-').replace(/[. ]+$/, '') || 'EchoFlow';
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    try {
+      link.href = url;
+      link.download = `${name}-LRC.zip`;
+      document.body.appendChild(link);
+      link.click();
+    } finally {
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+    return files.length;
+  }
+
   window.NCE_IMPORT = {
     pairsFromFileList,
     pairsFromZip,
     importPairs,
+    exportCollectionLrc,
     async importFileList(fileList, onProgress, book) {
       return importPairs(pairsFromFileList(fileList), onProgress, book);
     },

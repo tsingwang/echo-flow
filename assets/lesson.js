@@ -7,44 +7,57 @@
   // 工具 & 解析
   // --------------------------
   const {
-    timeTagsToSeconds, hasCJK, KEY_DISPLAY_NAMES, getKeyDisplayName, getShortcutKey,
+    KEY_DISPLAY_NAMES, getKeyDisplayName, getShortcutKey,
     findConflict, normalizeShadowRepeat, normalizeAutoStopCount,
     shouldSkipLine, findFirstContentIndex, formatTime,
-    countWords, clamp, seekLooksOk
+    countWords, clamp, seekLooksOk, escapeHTML
   } = NCEUtils;
-
-  const LINE_RE = /^((?:\[\d+:\d+(?:\.\d+)?\])+)(.*)$/;
-  const TIME_RE = /\[(\d+):(\d+(?:\.\d+)?)\]/g;
-  const META_RE = /^\[(al|ar|ti|by):(.+)\]$/i;
-
 
   async function fetchText(url) { const r = await fetch(url); if (!r.ok) throw new Error('Fetch failed ' + url); return await r.text(); }
 
   // 解析 LRC 文本（数据来源无关）。返回 { meta, items }。
   function parseLrcText(text) {
-    const rows = text.replace(/\r/g, '').split('\n');
-    const meta = { al: '', ar: '', ti: '', by: '' };
-    const items = [];
-    for (let i = 0; i < rows.length; i++) {
-      const raw = rows[i].trim(); if (!raw) continue;
-      const mm = raw.match(META_RE); if (mm) { meta[mm[1].toLowerCase()] = mm[2].trim(); continue; }
-      const m = raw.match(LINE_RE); if (!m) continue;
-      const tags = m[1];
-      const start = timeTagsToSeconds(tags);
-      let body = m[2].trim();
-      let en = body, cn = '';
-      if (body.includes('|')) { const parts = body.split('|'); en = parts[0].trim(); cn = (parts[1] || '').trim(); }
-      else if (i + 1 < rows.length) {
-        const m2 = rows[i + 1].trim().match(LINE_RE);
-        if (m2 && m2[1] === tags) {
-          const text2 = m2[2].trim();
-          if (hasCJK(text2)) { cn = text2; i++; }
-        }
-      }
-      items.push({ start, en, cn });
+    return NCEUtils.parseLrcText(text);
+  }
+
+  function formatSentenceTimestamp(seconds) {
+    const [minutes, rest] = formatTime(seconds).split(':');
+    return `${minutes.padStart(2, '0')}:${rest}`;
+  }
+
+  function parseSentenceTimestamp(value) {
+    const match = /^(\d+):([0-5]\d)(?:\.(\d{1,3}))?$/.exec(value.trim());
+    if (!match) throw new Error('时间格式须为 分:秒.毫秒，例如 00:12.300');
+    const ms = Number(match[1]) * 60000 + Number(match[2]) * 1000 +
+      Number((match[3] || '').padEnd(3, '0'));
+    if (!Number.isSafeInteger(ms)) throw new Error('时间超出可编辑范围');
+    return ms;
+  }
+
+  function validateSentenceTimestamp(ms, index, sentences, duration) {
+    const seconds = ms / 1000;
+    if (!Number.isSafeInteger(ms) || ms < 0 ||
+      (index > 0 && seconds <= sentences[index - 1].start) ||
+      (index + 1 < sentences.length && seconds >= sentences[index + 1].start) ||
+      (Number.isFinite(duration) && duration > 0 && seconds >= duration)) {
+      throw new Error('时间须大于前一句、小于后一句，且不能超出音频范围（首句可从 0 开始）');
     }
-    for (let i = 0; i < items.length; i++) items[i].end = i + 1 < items.length ? items[i + 1].start : 0;
-    return { meta, items };
+  }
+
+  function editLrcSentence(text, index, draft) {
+    const { items: sentences } = parseLrcText(text);
+    const sentence = sentences[index];
+    if (!sentence) throw new Error('句子不存在，请刷新后重试');
+    if (/[\r\n|]/.test(draft.en) || /[\r\n|]/.test(draft.cn)) {
+      throw new Error('每个文本框只能填写一行句子，且不能包含 LRC 分隔符 |');
+    }
+    const rows = text.split('\n');
+    const extraTags = sentence.tags.replace(/^\[\d+:\d+(?:\.\d+)?\]/, '');
+    const ending = rows[sentence.rowStart].endsWith('\r') ? '\r' : '';
+    const line = `[${formatSentenceTimestamp(draft.start)}]${extraTags}${draft.en.trim()}` +
+      (draft.cn.trim() ? ` | ${draft.cn.trim()}` : '') + ending;
+    rows.splice(sentence.rowStart, sentence.rowEnd - sentence.rowStart + 1, line);
+    return rows.join('\n');
   }
 
   // 从 IndexedDB（用户导入的资源）取 lrc 文本并解析。
@@ -53,7 +66,7 @@
     if (!store) throw new Error('资源存储未就绪');
     const rec = await store.getLesson(book, filename);
     if (!rec || !rec.lrcText) throw new Error('NO_LRC');
-    return parseLrcText(rec.lrcText);
+    return { ...parseLrcText(rec.lrcText), lrcText: rec.lrcText };
   }
 
   function qs(sel) { return document.querySelector(sel); }
@@ -76,45 +89,15 @@
   // --------------------------
   // 自定义快捷键系统
   // --------------------------
-  const SHORTCUTS_KEY = 'nce_shortcuts';
+  const SHORTCUTS_KEY = NCEUtils.SHORTCUTS_KEY;
 
   // 默认快捷键配置
-  const DEFAULT_SHORTCUTS = {
-    playPause: { key: ' ', label: '播放 / 暂停', group: '播放控制' },
-    replay: { key: 'r', label: '重播当前句', group: '播放控制' },
-    prevSentence: { key: 'ArrowLeft', label: '上一句', group: '句子导航' },
-    nextSentence: { key: 'ArrowRight', label: '下一句', group: '句子导航' },
-    prevLesson: { key: 'Ctrl+ArrowLeft', label: '上一课', group: '课程导航' },
-    nextLesson: { key: 'Ctrl+ArrowRight', label: '下一课', group: '课程导航' },
-    volumeUp: { key: 'ArrowUp', label: '增加音量', group: '音量控制' },
-    volumeDown: { key: 'ArrowDown', label: '减少音量', group: '音量控制' },
-    toggleReveal: { key: 'v', label: '显示/隐藏当前句', group: '听读模式' },
-  };
+  const DEFAULT_SHORTCUTS = NCEUtils.DEFAULT_SHORTCUTS;
 
 
   // 加载用户自定义快捷键
   function loadCustomShortcuts() {
-    try {
-      const saved = localStorage.getItem(SHORTCUTS_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        // 合并到默认配置
-        const result = JSON.parse(JSON.stringify(DEFAULT_SHORTCUTS));
-        for (const action of Object.keys(result)) {
-          if (typeof parsed[action] === 'string' && parsed[action]) {
-            result[action].key = parsed[action];
-          }
-        }
-        for (const action of Object.keys(result)) {
-          if (findConflict(result, action, result[action].key)) {
-            console.warn('已保存的快捷键与新默认键位冲突，已恢复默认快捷键');
-            return JSON.parse(JSON.stringify(DEFAULT_SHORTCUTS));
-          }
-        }
-        return result;
-      }
-    } catch (_) { }
-    return JSON.parse(JSON.stringify(DEFAULT_SHORTCUTS));
+    return NCEUtils.loadCustomShortcuts(localStorage);
   }
 
   // 保存自定义快捷键
@@ -174,6 +157,9 @@
 
     const [book, ...rest] = hash.split('/');
     const base = rest.join('/');
+    function lessonHref(filename) {
+      return `lesson.html#${book}/${filename}${queryParams.from === 'favorites' ? '?from=favorites' : ''}`;
+    }
     const inModern = /\/modern\//.test(location.pathname);
     const prefix = inModern ? '../' : '';
     // 音频与 lrc 不再来自服务器路径，改为从用户导入的 IndexedDB 资源读取（见 loadLrcFromStore / getAudioBlobUrl）。
@@ -182,20 +168,7 @@
     const subEl = qs('#lessonSub');
     const listEl = qs('#sentences');
     const audio = qs('#player');
-    audio.volume = 1;
-    try {
-      const savedVolume = localStorage.getItem('nce_volume');
-      if (savedVolume !== null) {
-        const volume = Number(savedVolume);
-        if (savedVolume.trim() && Number.isFinite(volume) && volume >= 0 && volume <= 1) {
-          audio.volume = volume;
-        } else {
-          console.warn('已保存的音量无效，使用默认音量');
-        }
-      }
-    } catch (error) {
-      console.warn('无法恢复音量设置', error);
-    }
+    audio.volume = NCEUtils.loadPlaybackVolume(localStorage);
     const backLink = qs('#backLink');
     const settingsBtn = qs('#settingsBtn');
     const settingsOverlay = qs('#settingsOverlay');
@@ -217,6 +190,12 @@
     const dataExportBtn = qs('#dataExportBtn');
     const dataImportBtn = qs('#dataImportBtn');
     const dataImportFile = qs('#dataImportFile');
+    const sentenceEditorOverlay = qs('#sentenceEditorOverlay');
+    const sentenceEditorPanel = qs('#sentenceEditorPanel');
+    const sentenceEditorTime = qs('#sentenceEditorTime');
+    const sentenceEditorEn = qs('#sentenceEditorEn');
+    const sentenceEditorCn = qs('#sentenceEditorCn');
+    const sentenceEditorError = qs('#sentenceEditorError');
 
     // --------------------------
     // 移动端浏览器：自动隐藏上下栏（非 PWA）
@@ -292,6 +271,7 @@
 
     // 状态
     let items = [];
+    let lessonLrcText = '';
     let idx = -1;
     let segmentEnd = 0;
     let segmentTimer = 0;
@@ -317,7 +297,7 @@
     let usingBlobSrc = false;
     let warnedNoRange = false;
 
-    // 句子清单（收藏）
+    // 句子收藏
     let sentenceFavs = loadSentenceFavs();
     let sentenceFavSet = new Set(sentenceFavs.map(x => x.id));
 
@@ -1096,12 +1076,17 @@
 
     // 返回
     if (backLink) {
-      const fallback = `index.html#${encodeURIComponent(book)}`;
-      backLink.setAttribute('href', fallback);
+      const fromFavorites = queryParams.from === 'favorites';
+      const destination = fromFavorites ? 'favorites.html' : `index.html#${encodeURIComponent(book)}`;
+      const label = qs('#backLinkLabel');
+      if (label) label.textContent = fromFavorites ? '返回' : '首页';
+      backLink.setAttribute('aria-label', fromFavorites ? '返回收藏' : '首页');
+      backLink.setAttribute('title', fromFavorites ? '返回收藏' : '首页');
+      backLink.setAttribute('href', destination);
       backLink.addEventListener('click', (e) => {
         e.preventDefault();
         pauseForNavigation();
-        location.href = fallback;
+        location.href = destination;
       });
     }
 
@@ -1545,9 +1530,133 @@
       });
     }
 
-    // Escape 键处理：优先关闭快捷键面板，然后关闭设置面板
+    // 句子编辑
+    let editingSentenceIndex = -1;
+    let savingSentence = false;
+    let sentenceEditorFocus = null;
+    function showSentenceEditorError(error) {
+      sentenceEditorError.textContent = error.message || String(error);
+      sentenceEditorError.hidden = false;
+    }
+    function openSentenceEditor(index) {
+      if (!sentenceEditorPanel || !sentenceEditorPanel.hidden || !items[index]) return;
+      sentenceEditorFocus = document.activeElement;
+      editingSentenceIndex = index;
+      ++playSeq;
+      loopReplayPending = false;
+      clearAdvance();
+      cancelIOSUnlockPause();
+      pauseForNavigation();
+      idx = index;
+      segmentEnd = endFor(items[index]);
+      highlight(index, false);
+      sentenceEditorTime.value = formatSentenceTimestamp(items[index].start);
+      sentenceEditorEn.value = items[index].en;
+      sentenceEditorCn.value = items[index].cn;
+      sentenceEditorError.hidden = true;
+      qs('#sentenceEditorTitle').textContent = `编辑第 ${index + 1} 句`;
+      qs('#sentenceEditorRange').textContent =
+        `前一句：${index > 0 ? formatSentenceTimestamp(items[index - 1].start) : '无'}；` +
+        `后一句：${index + 1 < items.length ? formatSentenceTimestamp(items[index + 1].start) : '无（以音频结尾为限）'}`;
+      sentenceEditorOverlay.hidden = false;
+      sentenceEditorPanel.hidden = false;
+      requestAnimationFrame(() => {
+        sentenceEditorOverlay.classList.add('show');
+        sentenceEditorPanel.classList.add('show');
+      });
+      document.body.style.overflow = 'hidden';
+      _trapRoot = sentenceEditorPanel;
+      enableTrap();
+      qs('#sentenceEditorDec').focus();
+    }
+    function stepSentenceTimestamp(delta) {
+      if (savingSentence) return;
+      try {
+        const ms = parseSentenceTimestamp(sentenceEditorTime.value) + delta;
+        validateSentenceTimestamp(ms, editingSentenceIndex, items, audio.duration);
+        sentenceEditorTime.value = formatSentenceTimestamp(ms / 1000);
+        sentenceEditorError.hidden = true;
+      } catch (error) {
+        showSentenceEditorError(error);
+      }
+    }
+    async function closeSentenceEditor() {
+      if (savingSentence || editingSentenceIndex < 0) return;
+      const index = editingSentenceIndex;
+      let nextText;
+      try {
+        const ms = parseSentenceTimestamp(sentenceEditorTime.value);
+        validateSentenceTimestamp(ms, index, items, audio.duration);
+        const original = items[index];
+        const draft = { start: ms / 1000, en: sentenceEditorEn.value.trim(), cn: sentenceEditorCn.value.trim() };
+        nextText = draft.start === original.start && draft.en === original.en && draft.cn === original.cn ?
+          lessonLrcText : editLrcSentence(lessonLrcText, index, draft);
+      } catch (error) {
+        showSentenceEditorError(error);
+        return;
+      }
+      savingSentence = true;
+      const controls = Array.from(sentenceEditorPanel.querySelectorAll('button, input, textarea'));
+      controls.forEach(control => control.disabled = true);
+      sentenceEditorPanel.setAttribute('aria-busy', 'true');
+      try {
+        if (nextText !== lessonLrcText) {
+          await window.NCE_RESOURCES.updateLessonLrc(book, base, lessonLrcText, nextText);
+          lessonLrcText = nextText;
+          items = parseLrcText(nextText).items;
+          _lastEndAdjusted = false;
+          adjustLastEndIfPossible();
+          firstContentIndex = skipIntro ? findFirstContentIndex(items) : 0;
+          shadowStartIndex = findFirstContentIndex(items, { skipQuestions: true });
+          idx = index;
+          segmentEnd = endFor(items[index]);
+          const favorite = sentenceFavs.find(item => item.id === sentenceFavId(index));
+          if (favorite) {
+            Object.assign(favorite, { start: items[index].start, en: items[index].en, cn: items[index].cn });
+            saveSentenceFavs(sentenceFavs);
+          }
+          render();
+          highlight(idx, false);
+          showNotification('句子已保存');
+        }
+      } catch (error) {
+        console.error('保存句子失败', error);
+        showSentenceEditorError(error);
+        return;
+      } finally {
+        savingSentence = false;
+        controls.forEach(control => control.disabled = false);
+        sentenceEditorPanel.removeAttribute('aria-busy');
+      }
+      editingSentenceIndex = -1;
+      disableTrap();
+      _trapRoot = null;
+      sentenceEditorOverlay.classList.remove('show');
+      sentenceEditorPanel.classList.remove('show');
+      sentenceEditorOverlay.hidden = true;
+      sentenceEditorPanel.hidden = true;
+      document.body.style.overflow = '';
+      const focus = sentenceEditorFocus && sentenceEditorFocus.isConnected ? sentenceEditorFocus :
+        listEl.querySelector(`.sentence[data-idx="${index}"]`);
+      if (focus) focus.focus({ preventScroll: true });
+    }
+    if (sentenceEditorOverlay) {
+      sentenceEditorOverlay.addEventListener('click', closeSentenceEditor);
+      qs('#sentenceEditorClose').addEventListener('click', closeSentenceEditor);
+      qs('#sentenceEditorDone').addEventListener('click', closeSentenceEditor);
+      qs('#sentenceEditorDec').addEventListener('click', () => stepSentenceTimestamp(-100));
+      qs('#sentenceEditorInc').addEventListener('click', () => stepSentenceTimestamp(100));
+    }
+
+    // Escape 键处理
     document.addEventListener('keydown', (e) => {
+      if (e.isComposing) return;
       if (e.key === 'Escape') {
+        if (sentenceEditorPanel && !sentenceEditorPanel.hidden) {
+          e.preventDefault();
+          closeSentenceEditor();
+          return;
+        }
         const dataConfirm = document.getElementById('dataConfirmOverlay');
         if (dataConfirm) {
           dataConfirm.remove();
@@ -1566,27 +1675,7 @@
     // --------------------------
     // 全局快捷键
     // --------------------------
-    let volumeToastTimer = 0;
-    function showVolumeToast(volume) {
-      let toast = document.getElementById('volumeToast');
-      if (!toast) {
-        toast = document.createElement('div');
-        toast.id = 'volumeToast';
-        toast.style.cssText = `
-          position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-          background: var(--surface); color: var(--text); border: 1px solid var(--border);
-          border-radius: var(--radius); padding: 20px 30px; box-shadow: var(--shadow);
-          z-index: 2000; backdrop-filter: saturate(120%) blur(10px);
-          font-size: 18px; font-weight: 500; min-width: 120px; text-align: center;
-          opacity: 0; transition: opacity 0.2s ease;
-        `;
-        document.body.appendChild(toast);
-      }
-      toast.textContent = `音量 ${Math.round(volume * 100)}%`;
-      toast.style.opacity = '1';
-      if (volumeToastTimer) clearTimeout(volumeToastTimer);
-      volumeToastTimer = setTimeout(() => { toast.style.opacity = '0'; }, 1000);
-    }
+    const showVolumeToast = NCEUtils.createVolumeToast(document);
 
     function changeVolume(delta) {
       const volume = Math.min(1, Math.max(0, Math.round((audio.volume + delta) * 100) / 100));
@@ -1601,21 +1690,33 @@
 
     // 检查按键是否匹配快捷键
     function matchesShortcut(event, action) {
-      const shortcutKey = currentShortcuts[action]?.key;
-      if (!shortcutKey) return false;
-      // 不区分大小写比较
-      return getShortcutKey(event)?.toLowerCase() === shortcutKey.toLowerCase();
+      return NCEUtils.matchesShortcut(event, action, currentShortcuts);
     }
 
     document.addEventListener('keydown', (e) => {
+      if (e.isComposing || e.defaultPrevented) return;
       // 避免在输入框中触发快捷键
       const target = e.target;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
         return;
       }
+      const helpShortcut = !e.ctrlKey && !e.altKey && !e.metaKey &&
+        (e.key === '?' || (e.shiftKey && e.key === '/'));
+      const activeDialog = document.querySelector('[role="dialog"]:not([hidden]), #searchModal:not([hidden]), #dataConfirmOverlay');
+      if (activeDialog && !(activeDialog === shortcutsPanel && helpShortcut)) return;
+
+      if (matchesShortcut(e, 'editSentence')) {
+        e.preventDefault();
+        if (e.repeat) return;
+        const sentence = target && target.closest ? target.closest('.sentence') : null;
+        const index = sentence ? Number(sentence.dataset.idx) : idx;
+        if (index >= 0 && index < items.length) openSentenceEditor(index);
+        else showNotification('请先选中一句，再按编辑快捷键');
+        return;
+      }
 
       // ? 键 - 打开/关闭快捷键帮助（固定键位，不可自定义）
-      if (!e.ctrlKey && !e.altKey && !e.metaKey && (e.key === '?' || (e.shiftKey && e.key === '/'))) {
+      if (helpShortcut) {
         e.preventDefault();
         if (shortcutsPanel && !shortcutsPanel.hidden) {
           closeShortcuts();
@@ -1698,24 +1799,19 @@
         return;
       }
 
-      // 下一句
-      if (matchesShortcut(e, 'nextSentence')) {
+      // 上一句 / 下一句
+      if (matchesShortcut(e, 'nextSentence') || matchesShortcut(e, 'prevSentence')) {
         e.preventDefault();
         const startIdx = readMode === 'shadow' ? shadowStartIndex : firstContentIndex;
-        const nextIdx = idx < 0 ? startIdx : Math.min(idx + 1, items.length - 1);
-        if (nextIdx < items.length) {
-          playSegment(nextIdx, { manual: true });
-        }
-        return;
-      }
-
-      // 上一句
-      if (matchesShortcut(e, 'prevSentence')) {
-        e.preventDefault();
-        const startIdx = readMode === 'shadow' ? shadowStartIndex : firstContentIndex;
-        const prevIdx = idx < 0 ? startIdx : Math.max(idx - 1, 0);
-        if (prevIdx >= 0) {
-          playSegment(prevIdx, { manual: true });
+        const next = matchesShortcut(e, 'nextSentence');
+        const index = idx < 0 ? startIdx :
+          (next ? Math.min(idx + 1, items.length - 1) : Math.max(idx - 1, 0));
+        if (index >= 0 && index < items.length) {
+          playSegment(index, { manual: true });
+          if (target && target.closest && target.closest('.sentence')) {
+            const sentence = listEl.querySelector(`.sentence[data-idx="${index}"]`);
+            if (sentence) sentence.focus({ preventScroll: true });
+          }
         }
         return;
       }
@@ -1775,8 +1871,8 @@
     // --------------------------
     function render() {
       const html = items.map((it, i) => `
-        <div class="sentence" data-idx="${i}">
-          <button class="sentence-fav-btn ${sentenceFavSet.has(sentenceFavId(i)) ? 'active' : ''}" data-idx="${i}" aria-label="${sentenceFavSet.has(sentenceFavId(i)) ? '从清单移除' : '加入清单'}" aria-pressed="${sentenceFavSet.has(sentenceFavId(i))}">
+        <div class="sentence" data-idx="${i}" tabindex="0" aria-label="第 ${i + 1} 句">
+          <button class="sentence-fav-btn ${sentenceFavSet.has(sentenceFavId(i)) ? 'active' : ''}" data-idx="${i}" aria-label="${sentenceFavSet.has(sentenceFavId(i)) ? '从收藏移除' : '加入收藏'}" aria-pressed="${sentenceFavSet.has(sentenceFavId(i))}">
             <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
               <path d="M8 12.027 3.297 14.5l.9-5.243L.1 5.997l5.258-.764L8 0l2.642 5.233 5.258.764-4.097 3.26.9 5.243L8 12.027Z"></path>
             </svg>
@@ -1785,8 +1881,8 @@
             <span class="reveal-icon">👁</span>
             <span class="reveal-text">显示</span>
           </button>
-          <div class="en">${it.en}</div>
-          ${it.cn ? `<div class="cn">${it.cn}</div>` : ''}
+          <div class="en">${escapeHTML(it.en)}</div>
+          ${it.cn ? `<div class="cn">${escapeHTML(it.cn)}</div>` : ''}
         </div>
       `).join('');
       qs('#sentences').innerHTML = html;
@@ -1827,10 +1923,10 @@
         const isFav = sentenceFavSet.has(id);
         btn.classList.toggle('active', isFav);
         btn.setAttribute('aria-pressed', isFav ? 'true' : 'false');
-        btn.setAttribute('aria-label', isFav ? '从清单移除' : '加入清单');
+        btn.setAttribute('aria-label', isFav ? '从收藏移除' : '加入收藏');
       }
 
-      showNotification(added ? '已加入清单' : '已从清单移除');
+      showNotification(added ? '已加入收藏' : '已从收藏移除');
     }
 
     function computeEnd(it) {
@@ -2049,6 +2145,7 @@
     }
 
     async function playSegment(i, opts) {
+      if (sentenceEditorPanel && !sentenceEditorPanel.hidden) return;
       const manual = !!(opts && opts.manual);
       const shadowRepeat = !!(opts && opts.shadowRepeat);
       const prevIdx = idx;
@@ -2071,6 +2168,7 @@
 
       // 在 iOS 上，seek 前优先确保 metadata
       await ensureMetadata();
+      if (mySeq !== playSeq) return;
 
       clearShadowGapTimer();
       shadowAutoPause = false;
@@ -2139,6 +2237,7 @@
               }
             }
 
+            if (mySeq !== playSeq) return;
             const p = audio.play(); if (p && p.catch) p.catch(() => { });
             raf2(() => scheduleAdvance());
           };
@@ -2387,6 +2486,7 @@
     // --------------------------
     let lastUpdateTime = 0;
     audio.addEventListener('timeupdate', () => {
+      if (sentenceEditorPanel && !sentenceEditorPanel.hidden) return;
       const t = audio.currentTime;
       // 点读模式或听读模式（单句循环）安全网：如果 scheduleAdvance 失效，这里兜底暂停
       if (readMode === 'shadow' && segmentEnd && t >= segmentEnd && !audio.paused) {
@@ -2528,7 +2628,7 @@
             map[nextId] = { t: 0, idx: 0, ts: Date.now() };
             localStorage.setItem(LASTPOS_KEY, JSON.stringify(map));
           } catch (_) { }
-          window.location.href = `lesson.html#${book}/${nextLesson.filename}`;
+          window.location.href = lessonHref(nextLesson.filename);
         }, 2000);
       } else {
         showNotification('🎉 恭喜，课程库里的课都学完了！');
@@ -2540,12 +2640,12 @@
         const i = lessons.findIndex(x => x.filename === base);
         if (i > 0) {
           const prev = lessons[i - 1].filename;
-          prevLessonHref = `lesson.html#${book}/${prev}`;
+          prevLessonHref = lessonHref(prev);
           if (prevLessonLink) { prevLessonLink.href = prevLessonHref; prevLessonLink.style.display = ''; }
         } else { if (prevLessonLink) prevLessonLink.style.display = 'none'; }
         if (i >= 0 && i + 1 < lessons.length) {
           const next = lessons[i + 1].filename;
-          nextLessonHref = `lesson.html#${book}/${next}`;
+          nextLessonHref = lessonHref(next);
           if (nextLessonLink) { nextLessonLink.href = nextLessonHref; nextLessonLink.style.display = ''; }
         } else { if (nextLessonLink) nextLessonLink.style.display = 'none'; }
       } catch (_) {
@@ -2611,9 +2711,10 @@
       } catch (_) { }
     }
 
-    loadLrcFromStore(book, base).then(({ meta, items: arr }) => {
+    loadLrcFromStore(book, base).then(({ meta, items: arr, lrcText }) => {
       if (_resourceMissingShown) return; // 音频缺失提示已展示，保持导入引导，不渲染课文
       items = arr;
+      lessonLrcText = lrcText;
       const lessonTitle = meta.ti || base;
       titleEl.textContent = lessonTitle;
       subEl.textContent = `${meta.al || ''} ${meta.ar || ''}`.trim();

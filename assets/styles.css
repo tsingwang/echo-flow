@@ -445,8 +445,24 @@ body {
   color: var(--text);
 }
 
-/* Favorite button on lesson item - Apple style */
-.fav-btn {
+.lesson-card-link {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-self: stretch;
+  color: inherit;
+  text-decoration: none;
+}
+
+.lesson-card-link::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+
+.lesson-delete-btn {
+  position: relative;
+  z-index: 1;
   flex: 0 0 auto;
   width: 32px;
   height: 32px;
@@ -456,6 +472,7 @@ body {
   background: transparent;
   color: var(--muted);
   opacity: 0;
+  pointer-events: none;
   transition: all .2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
   cursor: pointer;
   padding: 0;
@@ -464,30 +481,37 @@ body {
   border-radius: 8px;
 }
 
-.lesson-item:hover .fav-btn {
-  opacity: 0.5
+.lesson-item:hover .lesson-delete-btn,
+.lesson-item:focus-within .lesson-delete-btn {
+  opacity: 1;
+  pointer-events: auto;
 }
 
-.fav-btn:hover {
+.lesson-item .lesson-delete-btn:disabled {
+  opacity: 0.3;
+  pointer-events: none;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.lesson-delete-btn:hover,
+.lesson-delete-btn:focus-visible {
   opacity: 1;
   color: var(--text);
   background: var(--surface);
   transform: scale(1.1);
 }
 
-.fav-btn.active {
-  opacity: 1;
-  color: var(--text);
+@media (hover: none), (pointer: coarse) {
+  .lesson-delete-btn {
+    opacity: 0.6;
+    pointer-events: auto;
+  }
 }
 
-.fav-btn.active:hover {
-  background: var(--surface);
-}
-
-.fav-btn svg {
+.lesson-delete-btn svg {
   width: 18px;
   height: 18px;
-  fill: currentColor
 }
 
 /* Lesson page */
@@ -715,6 +739,13 @@ body.favorites-page .fav-item.active .sentence-fav-btn {
   box-shadow: var(--shadow-hover)
 }
 
+.sentence-jump-btn:disabled {
+  cursor: default;
+  opacity: .6;
+  transform: none;
+  box-shadow: none
+}
+
 .fav-meta {
   margin-top: 8px;
   font-size: 12px;
@@ -905,6 +936,14 @@ body.favorites-page .fav-item.active .sentence-fav-btn {
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
   padding: 19px;
   /* 减1px以补偿2px边框 */
+}
+
+body.lesson-page .sentence:focus {
+  outline: none;
+  border: 2px solid var(--text);
+  padding: 19px;
+  box-shadow: none;
+  transition: background-color .35s ease, color .35s ease;
 }
 
 .sentence.listen-mode.revealed .en,
@@ -1567,6 +1606,58 @@ body,
 
 .settings-overlay.show {
   opacity: 1;
+}
+
+.settings-content-scroll.sentence-editor-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sentence-editor-timestamp {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sentence-editor-fields input,
+.sentence-editor-fields textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.sentence-editor-fields textarea {
+  resize: vertical;
+  min-height: 80px;
+}
+
+.sentence-editor-timestamp input {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.sentence-editor-timestamp .stepper-btn {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+}
+
+.sentence-editor-fields p {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+#sentenceEditorError {
+  color: var(--text);
+  border-left: 3px solid var(--danger);
+  padding-left: 10px;
 }
 
 /* Header */

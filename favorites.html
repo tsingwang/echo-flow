@@ -10,7 +10,7 @@
   <link rel="icon" href="favicon.ico">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
   <link rel="manifest" href="manifest.json">
-  <title>我的清单 - EchoFlow</title>
+  <title>我的收藏 - EchoFlow</title>
   <meta name="robots" content="noindex,follow">
   <script>
     (function () {
@@ -30,6 +30,8 @@
   <script src="assets/app.js" defer></script>
   <script src="assets/search.js" defer></script>
   <script src="assets/storage.js" defer></script>
+  <script src="assets/resource-store.js" defer></script>
+  <script src="assets/collections.js" defer></script>
   <script src="assets/favorites.js" defer></script>
 
   <!-- 主题切换逻辑 -->
@@ -140,9 +142,9 @@
     </div>
     <div class="toolbar">
       <div class="topbar-inner">
-        <a id="backBtn" class="back-inline" href="index.html" aria-label="返回">
+        <a id="backBtn" class="back-inline" href="index.html" aria-label="首页" title="首页">
           <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M9.78 3.22a.75.75 0 0 1 0 1.06L6.06 8l3.72 3.72a.75.75 0 1 1-1.06 1.06L4.47 8.53a1.25 1.25 0 0 1 0-1.77l4.25-4.25a.75.75 0 0 1 1.06 0Z"></path></svg>
-          返回
+          首页
         </a>
         <div class="topbar-actions">
           <button id="ttsSettingsBtn" class="back-inline" type="button" aria-label="设置" title="设置">设置</button>
@@ -151,9 +153,13 @@
     </div>
 
     <header class="hero">
-      <h1 id="favTitle">清单</h1>
+      <h1 id="favTitle">收藏</h1>
       <p id="favSub" class="muted"></p>
     </header>
+    <nav id="favoriteCollectionBar" class="collection-bar" aria-label="收藏合集分类" hidden>
+      <div id="favoriteCollectionTabs" class="collection-tabs" role="tablist" aria-label="按合集过滤收藏"></div>
+    </nav>
+    <p id="favoriteCollectionStatus" class="library-status" role="status" aria-live="polite">正在加载合集分类…</p>
 
     <div id="searchModal" class="search-overlay" hidden>
       <div class="search-container">
@@ -193,26 +199,27 @@
 
   </div>
 
-  <!-- Bottom TTS bar -->
-  <div class="bottom-player-bar" role="region" aria-label="清单播放器">
+  <!-- Bottom player bar -->
+  <div class="bottom-player-bar" role="region" aria-label="收藏播放器">
+    <audio id="favoriteAudio" preload="metadata"></audio>
     <div class="player">
       <div class="custom-player tts-player">
-        <button id="ttsPrev" class="play-btn" type="button" aria-label="上一句" title="上一句">
+        <button id="ttsPrev" class="play-btn" type="button" aria-label="上一句" aria-keyshortcuts="ArrowLeft" title="上一句（←）">
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h2v14H6V5zm3 7 13 7V5l-13 7z"/></svg>
         </button>
-        <button id="ttsPlayPause" class="play-btn" type="button" aria-label="播放/暂停" title="播放/暂停">
+        <button id="ttsPlayPause" class="play-btn" type="button" aria-label="播放/暂停" aria-keyshortcuts="Space" title="播放/暂停（Space）">
           <svg class="play-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
           <svg class="pause-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="display:none"><path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/></svg>
         </button>
-        <button id="ttsNext" class="play-btn" type="button" aria-label="下一句" title="下一句">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16 5h2v14h-2V5zM2 12l13 7V5L2 12z"/></svg>
+        <button id="ttsNext" class="play-btn" type="button" aria-label="下一句" aria-keyshortcuts="ArrowRight" title="下一句（→）">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16 5h2v14h-2V5zM2 5v14l13-7L2 5z"/></svg>
         </button>
         <div class="time-display" id="ttsPos">0/0</div>
       </div>
     </div>
   </div>
 
-  <!-- TTS Settings -->
+  <!-- Playback settings -->
   <div id="ttsOverlay" class="settings-overlay" hidden></div>
   <div id="ttsPanel" class="settings-panel modern-settings" role="dialog" aria-modal="true" aria-labelledby="ttsTitle" hidden>
     <div class="settings-header">
@@ -241,13 +248,13 @@
       <div class="settings-group">
         <div class="settings-left">
           <div class="settings-label">循环模式</div>
-          <div class="settings-desc">选择是否单句循环或循环整个清单。</div>
+          <div class="settings-desc">选择是否单句循环或循环当前分类中的全部收藏。</div>
         </div>
         <div class="settings-control">
           <select id="ttsLoopSelect" class="tts-select" aria-label="循环模式">
             <option value="off">关（只播放当前一句）</option>
             <option value="one">单句循环</option>
-            <option value="all">全清单循环</option>
+            <option value="all">当前分类循环</option>
           </select>
         </div>
       </div>
@@ -255,7 +262,7 @@
       <div class="settings-group">
         <div class="settings-left">
           <div class="settings-label">播放速度</div>
-          <div class="settings-desc">选择朗读的倍速。</div>
+          <div class="settings-desc">原音频和语音朗读均使用此倍速。</div>
         </div>
         <div class="settings-control">
           <select id="ttsRateSelect" class="tts-select" aria-label="播放速度"></select>
@@ -265,7 +272,7 @@
       <div class="settings-group">
         <div class="settings-left">
           <div class="settings-label">音色</div>
-          <div class="settings-desc">不同浏览器/设备音色可能不同。</div>
+          <div class="settings-desc">仅在原音频不可用、改用语音朗读时生效。音色由浏览器/系统提供。</div>
         </div>
         <div class="settings-control">
           <select id="ttsVoice" class="tts-select" aria-label="音色"></select>
@@ -274,11 +281,11 @@
 
       <div class="settings-group">
         <div class="settings-left">
-          <div class="settings-label">清单</div>
-          <div class="settings-desc">清空清单会移除所有已收藏句子。</div>
+          <div class="settings-label">收藏</div>
+          <div id="clearListDescription" class="settings-desc">清空当前分类中的收藏句子；选择“全部”时才清空所有收藏。</div>
         </div>
         <div class="settings-control">
-          <button id="clearListBtn" class="back-inline" type="button" aria-label="清空清单" title="清空清单">清空清单</button>
+          <button id="clearListBtn" class="back-inline" type="button" aria-label="清空收藏" title="清空收藏">清空收藏</button>
         </div>
       </div>
 

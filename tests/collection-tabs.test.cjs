@@ -37,6 +37,20 @@ test('an empty tab bar does not create an implicit default collection', () => {
   assert.doesNotMatch(tabs.innerHTML, /<button|默认合集/);
 });
 
+test('filter tabs reuse the supplied order without dragging or sorting hints', () => {
+  const api = setup();
+  const tabs = { querySelector() { return null; } };
+  api.renderTabs(tabs, [
+    { id: 'all', name: '全部 (3)' },
+    { id: 'book-two', name: 'Second (2)' },
+    { id: 'book-one', name: 'First (1)' }
+  ], 'all', false, { reorderable: false });
+  assert.ok(tabs.innerHTML.indexOf('book-two') < tabs.innerHTML.indexOf('book-one'));
+  assert.doesNotMatch(tabs.innerHTML, /draggable="true"|拖动排序|Alt/);
+  assert.match(tabs.innerHTML, /draggable="false"/);
+  assert.match(tabs.innerHTML, /aria-selected="true"/);
+});
+
 test('the active tab scrolls into view without moving the page', () => {
   const api = setup();
   let bounds = { left: 250, right: 350 };

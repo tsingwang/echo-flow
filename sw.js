@@ -3,7 +3,7 @@
  * 缓存策略：核心文件缓存优先。音频/字幕由用户导入并存于 IndexedDB，不经 SW。
  */
 
-const CACHE_NAME = 'echoflow-v2.2.6-collection-order';
+const CACHE_NAME = 'echoflow-v2.2.19-editor-timestamp-focus';
 
 // 核心静态资源（预缓存）
 const PRECACHE_ASSETS = [

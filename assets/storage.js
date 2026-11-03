@@ -246,13 +246,16 @@
     });
   }
 
-  async function clearLearningHistory(book) {
+  async function clearLearningHistory(book, filename) {
+    if (filename !== undefined && (!book || !filename)) throw new Error('清理单课学习记录需要合集和文件名');
+    const lessonId = filename === undefined ? null : `${book}/${filename}`;
+    const belongs = id => typeof id === 'string' &&
+      (lessonId ? id === lessonId : id.startsWith(book + '/'));
     // 显式空值也会写入同步包，避免服务端保留旧进度。
     LEARNING_HISTORY_KEYS.forEach(key => {
       let value = key === 'nce_recents' ? [] : {};
       if (book) {
         const previous = JSON.parse(localStorage.getItem(key) || JSON.stringify(value));
-        const belongs = id => typeof id === 'string' && id.startsWith(book + '/');
         value = key === 'nce_recents'
           ? previous.filter(item => !belongs(item.id))
           : Object.fromEntries(Object.entries(previous).filter(([id]) => !belongs(id)));
@@ -260,7 +263,7 @@
       localStorage.setItem(key, JSON.stringify(value));
     });
     const resume = sessionStorage.getItem('nce_resume');
-    if (!book || (resume && resume.startsWith(book + '/'))) {
+    if (!book || belongs(resume)) {
       ['nce_resume', 'nce_resume_play', 'nce_auto_next_played_lessons'].forEach(key => {
         sessionStorage.removeItem(key);
       });

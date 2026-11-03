@@ -175,7 +175,6 @@
       const container = document.getElementById('lessons');
       const lastWrap = document.getElementById('lastSeenWrap');
       const lastBox = document.getElementById('lastSeen');
-      const FAV_KEY = 'nce_favs';
       const RECENT_KEY = 'nce_recents';
       const collectionTabs = document.getElementById('collectionTabs');
       const importCollection = document.getElementById('importCollection');
@@ -187,14 +186,16 @@
       const emptyEl = document.getElementById('libraryEmpty');
       const gridEl = document.getElementById('lessonsGrid');
       const clearBtn = document.getElementById('clearLibraryBtn');
+      const exportLrcBtn = document.getElementById('exportLrcBtn');
       const clearDialog = document.getElementById('clearCollectionDialog');
+      const deleteLessonDialog = document.getElementById('deleteLessonDialog');
       const libraryStatus = document.getElementById('libraryStatus');
       let library = [];
       let resourceBusy = false;
 
       function setResourceBusy(busy) {
         resourceBusy = busy;
-        ['clearLibraryBtn', 'importOpenBtn', 'emptyImportBtn',
+        ['clearLibraryBtn', 'exportLrcBtn', 'importOpenBtn', 'emptyImportBtn',
           'importFolderBtn', 'importFilesBtn', 'importZipBtn'].forEach(id => {
           document.getElementById(id).disabled = busy || !currentBook;
         });
@@ -203,11 +204,35 @@
           tab.disabled = busy;
           tab.draggable = !busy;
         });
+        gridEl.querySelectorAll('.lesson-delete-btn').forEach(button => button.disabled = busy);
       }
 
       function currentName() {
         return collections.find(item => item.id === currentBook)?.name || '';
       }
+
+      exportLrcBtn.addEventListener('click', async () => {
+        if (resourceBusy) return;
+        if (!currentBook) {
+          libraryStatus.textContent = '请先创建并选择合集。';
+          return;
+        }
+        const book = currentBook;
+        const name = currentName();
+        setResourceBusy(true);
+        exportLrcBtn.textContent = '正在导出…';
+        libraryStatus.textContent = '正在打包当前合集的 LRC 字幕…';
+        try {
+          const count = await NCE_IMPORT.exportCollectionLrc(book);
+          libraryStatus.textContent = `已发起合集「${name}」的 LRC ZIP 下载，包含 ${count} 个字幕文件，不含音频。`;
+        } catch (error) {
+          console.error('导出字幕失败：', error);
+          libraryStatus.textContent = '导出字幕失败：' + (error.message || error);
+        } finally {
+          exportLrcBtn.textContent = '导出';
+          setResourceBusy(false);
+        }
+      });
 
       function confirmCleanup(name) {
         document.getElementById('clearCollectionName').textContent = name;
@@ -216,6 +241,17 @@
           clearDialog.showModal();
           clearDialog.addEventListener('close', () => resolve(clearDialog.returnValue === 'clear'), { once: true });
           document.getElementById('clearCollectionCancel').focus();
+        });
+      }
+
+      function confirmLessonDeletion(lesson) {
+        document.getElementById('deleteLessonName').textContent = lesson.title || lesson.filename;
+        document.getElementById('deleteLessonFilename').textContent = lesson.filename;
+        deleteLessonDialog.returnValue = 'cancel';
+        return new Promise(resolve => {
+          deleteLessonDialog.showModal();
+          deleteLessonDialog.addEventListener('close', () => resolve(deleteLessonDialog.returnValue === 'delete'), { once: true });
+          document.getElementById('deleteLessonCancel').focus();
         });
       }
 
@@ -318,33 +354,31 @@
         catch (error) { libraryStatus.textContent = '加载合集失败：' + (error.message || error); }
         finally { setResourceBusy(false); }
       });
-      function getFavs() { try { return new Set(JSON.parse(localStorage.getItem(FAV_KEY) || '[]')); } catch (_) { return new Set(); } }
-      function saveFavs(set) { try { localStorage.setItem(FAV_KEY, JSON.stringify(Array.from(set))); } catch (_) { } }
-
       function lessonHref(lesson) { return `lesson.html#${encodeURIComponent(lesson.book)}/${encodeURIComponent(lesson.filename)}`; }
       function fmtTime(t) { t = Math.max(0, Math.floor(t || 0)); const m = Math.floor(t / 60); const s = t % 60; return `${m}:${String(s).padStart(2, '0')}`; }
       function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
-      function itemHTML(lesson, idx, favs) {
+      function itemHTML(lesson, idx) {
         const id = lesson.id;
-        const isFav = favs.has(id);
         const no = String(idx + 1).padStart(2, '0');
         return `
-          <a class="lesson-item" href="${esc(lessonHref(lesson))}" data-id="${esc(id)}">
-            <div class="lesson-content">
-              <div class="lesson-num">${no}</div>
-              <div class="lesson-title">${esc(lesson.title || lesson.filename)}</div>
-            </div>
-            <button class="fav-btn ${isFav ? 'active' : ''}" type="button" aria-label="收藏" aria-pressed="${isFav}" data-id="${esc(id)}">
-              <svg viewBox="0 0 16 16" aria-hidden="true">
-                <path d="M8 12.027 3.297 14.5l.9-5.243L.1 5.997l5.258-.764L8 0l2.642 5.233 5.258.764-4.097 3.26.9 5.243L8 12.027Z"></path>
+          <div class="lesson-item" data-id="${esc(id)}">
+            <a class="lesson-card-link" href="${esc(lessonHref(lesson))}">
+              <div class="lesson-content">
+                <div class="lesson-num">${no}</div>
+                <div class="lesson-title">${esc(lesson.title || lesson.filename)}</div>
+              </div>
+            </a>
+            <button class="lesson-delete-btn" type="button" aria-label="删除课程：${esc(lesson.title || lesson.filename)}"
+              title="删除课程" data-id="${esc(id)}" ${resourceBusy ? 'disabled' : ''}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6M14 10v6"></path>
               </svg>
             </button>
-          </a>`;
+          </div>`;
       }
 
       function render() {
-        const favs = getFavs();
         const hasLessons = library.length > 0;
 
         // 上次学习仅显示当前合集的最近记录。
@@ -389,20 +423,45 @@
         document.getElementById('emptyImportBtn').hidden = !currentBook;
         document.getElementById('emptyDropHint').hidden = !currentBook;
         if (countEl) countEl.textContent = hasLessons ? `${library.length} 课` : '';
-        if (gridEl) gridEl.innerHTML = hasLessons ? library.map((l, i) => itemHTML(l, i, favs)).join('') : '';
+        if (gridEl) gridEl.innerHTML = hasLessons ? library.map((l, i) => itemHTML(l, i)).join('') : '';
       }
-      // 收藏切换（事件委托，避免把文件名内插进 onclick）
-      container.addEventListener('click', (e) => {
-        const favBtn = e.target.closest('.fav-btn');
-        if (favBtn) {
+      container.addEventListener('click', async (e) => {
+        const deleteBtn = e.target.closest('.lesson-delete-btn');
+        if (deleteBtn) {
           e.preventDefault();
           e.stopPropagation();
-          const id = favBtn.dataset.id;
-          if (!id) return;
-          const favs = getFavs();
-          if (favs.has(id)) favs.delete(id); else favs.add(id);
-          saveFavs(favs);
-          render();
+          if (resourceBusy) return;
+          const index = library.findIndex(lesson => lesson.id === deleteBtn.dataset.id);
+          const lesson = library[index];
+          if (!lesson) {
+            libraryStatus.textContent = '课程列表已变化，请刷新后重试。';
+            return;
+          }
+          const label = `课程「${lesson.title || lesson.filename}」`;
+          let deleted = false;
+          setResourceBusy(true);
+          try {
+            if (!await confirmLessonDeletion(lesson)) return;
+            libraryStatus.textContent = `正在删除${label}及其学习记录…`;
+            await NCE_RESOURCES.deleteLesson(lesson.book, lesson.filename);
+            deleted = true;
+            await NCE_STORAGE.clearLearningHistory(lesson.book, lesson.filename);
+            libraryStatus.textContent = `已删除${label}及其音频、字幕和学习记录，句子收藏与设置已保留。`;
+          } catch (error) {
+            console.error('删除课程失败：', error);
+            libraryStatus.textContent = deleted
+              ? `已删除${label}，但学习记录清理或同步未完成：${error.message || error}。`
+              : `删除${label}失败：${error.message || error}。`;
+          } finally {
+            if (deleted) {
+              library = library.filter(item => item.id !== lesson.id);
+              render();
+            }
+            setResourceBusy(false);
+            const buttons = gridEl.querySelectorAll('.lesson-delete-btn');
+            const focus = deleted ? buttons[Math.min(index, buttons.length - 1)] || document.getElementById('importOpenBtn') : deleteBtn;
+            focus.focus({ preventScroll: true });
+          }
           return;
         }
         const a = e.target.closest('#lastSeenLink');
@@ -546,7 +605,7 @@
             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
           </svg>
         </button>
-        <a href="favorites.html" class="icon-btn home-fav-link" id="favoritesLinkHome" aria-label="收藏清单">
+        <a href="favorites.html" class="icon-btn home-fav-link" id="favoritesLinkHome" aria-label="收藏">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
             stroke-linejoin="round">
             <path d="M12 17.75 5.83 21l1.18-6.88L2 9.24l6.91-1L12 2l3.09 6.24 6.91 1-5.01 4.88L18.17 21z"></path>
@@ -601,6 +660,7 @@
         </div>
         <div class="library-actions">
           <button type="button" class="btn-quiet" id="clearLibraryBtn" disabled>清理</button>
+          <button type="button" class="btn-quiet" id="exportLrcBtn" title="将当前合集的全部 LRC 字幕打包为 ZIP 下载，不含音频" disabled>导出</button>
           <button type="button" class="btn-quiet" id="importOpenBtn">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
               <line x1="12" y1="5" x2="12" y2="19"></line>
@@ -791,6 +851,20 @@
       <div class="collection-dialog-actions">
         <button type="submit" class="btn-quiet" id="clearCollectionCancel" value="cancel" autofocus>取消</button>
         <button type="submit" class="btn-quiet btn-danger" id="clearCollectionConfirm" value="clear">确认清理</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="deleteLessonDialog" class="collection-dialog"
+    aria-labelledby="deleteLessonTitle" aria-describedby="deleteLessonDescription deleteLessonWarning">
+    <form method="dialog">
+      <h2 class="modal-title" id="deleteLessonTitle">删除课程</h2>
+      <p class="modal-text" id="deleteLessonDescription">确定删除课程「<strong id="deleteLessonName"></strong>」及其音频、字幕和学习记录？</p>
+      <p class="collection-clear-note">文件名：<span id="deleteLessonFilename"></span></p>
+      <p class="collection-clear-note">只删除当前合集中的这一课，合集、其他课程、句子收藏与设置均会保留。收藏文本仍可查看和合成朗读，但原资源链接会失效。</p>
+      <p class="collection-clear-note" id="deleteLessonWarning"><strong>此操作不可撤销。</strong>不会删除电脑上的原始文件。删除前请关闭该课程的其他学习页面，避免旧页面重新写入进度。</p>
+      <div class="collection-dialog-actions">
+        <button type="submit" class="btn-quiet" id="deleteLessonCancel" value="cancel" autofocus>取消</button>
+        <button type="submit" class="btn-quiet btn-danger" id="deleteLessonConfirm" value="delete">确认删除</button>
       </div>
     </form>
   </dialog>

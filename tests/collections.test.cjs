@@ -33,6 +33,7 @@ test('imports with identical filenames stay isolated and partial reimports merge
   assert.equal(records.size, 2);
   assert.equal(records.get('lib/one').title, 'Default');
   assert.equal(records.get('lib/one').audioBlob, defaultAudio);
+  assert.equal(records.get('lib/one').lrcFilename, 'one.lrc');
   assert.equal(records.get('book-two/one').title, 'Other');
   assert.equal(records.get('book-two/one').audioBlob, otherAudio);
   assert.equal(records.get('book-two/one').book, 'book-two');
@@ -46,6 +47,7 @@ test('folder pairing preserves the selected collection and rejects unknown desti
   const result = await api.importFileList([audio, lrc], (...args) => progress.push(args), 'book-two');
   assert.equal(result.imported, 1);
   assert.equal(records.get('book-two/one').lrcText, '[00:00]Hello');
+  assert.equal(records.get('book-two/one').lrcFilename, 'one.lrc');
   assert.equal(progress.length, 1);
   await assert.rejects(api.importFileList([audio], null, 'missing'), /目标合集不存在/);
   await assert.rejects(api.importFileList([audio]), /请先创建并选择合集/);
@@ -73,7 +75,22 @@ test('ZIP imports require a collection and import into that collection', async (
   }, null, 'book-two');
   assert.equal(records.size, 1);
   assert.equal(records.get('book-two/one').lrcText, '[00:00]Hello');
+  assert.equal(records.get('book-two/one').lrcFilename, 'one.lrc');
   await assert.rejects(api.importZipFile({}), /请先创建并选择合集/);
+});
+
+test('import preserves the exact LRC filename and headers through audio-only reimports', async () => {
+  const { api, records } = importer();
+  const text = '[al:Album]\r\n[ar:Artist]\r\n[ti:Different title]\r\n[by:Author]\r\n[offset:10]\r\n[00:00.001]Hello\r\n';
+  const file = { ...textFile('01 Hello.LRC', text), webkitRelativePath: 'folder/01 Hello.LRC' };
+  await api.importFileList([file], null, 'lib');
+  await api.importFileList([{ name: '01 Hello.mp3' }], null, 'lib');
+  assert.equal(records.get('lib/01 Hello').lrcFilename, '01 Hello.LRC');
+  assert.equal(records.get('lib/01 Hello').lrcText, text);
+  assert.equal(records.get('lib/01 Hello').title, 'Different title');
+  await api.importFileList([textFile('01 Hello.lrc', '')], null, 'lib');
+  assert.equal(records.get('lib/01 Hello').lrcFilename, '01 Hello.lrc');
+  assert.equal(records.get('lib/01 Hello').lrcText, '');
 });
 
 test('lesson page keeps its lesson heading without branding or collection controls', () => {

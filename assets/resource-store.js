@@ -11,6 +11,7 @@
  *     title: "Morning Dialogue",   // 取自 lrc [ti:]，否则为文件名
  *     audioBlob: Blob,             // audio/mpeg
  *     lrcText: "string",           // 原始 .lrc 文本
+ *     lrcFilename: "01 Morning Dialogue.lrc", // 上传的字幕文件名（含原始扩展名）
  *     importedAt: <ms>
  *   }
  *
@@ -194,6 +195,32 @@
     return rec || null;
   }
 
+  async function updateLessonLrc(book, filename, expectedText, lrcText) {
+    if (typeof expectedText !== 'string' || typeof lrcText !== 'string') {
+      throw new Error('字幕内容无效');
+    }
+    const db = await openDB();
+    const transaction = db.transaction(STORE, 'readwrite');
+    const done = transactionDone(transaction);
+    const store = transaction.objectStore(STORE);
+    let conflict;
+    const request = store.get(makeId(book, filename));
+    request.onsuccess = () => {
+      const record = request.result;
+      if (!record || record.lrcText !== expectedText) {
+        conflict = new Error(record ? '字幕已在其他页面更新，请刷新后重新编辑' : '课程已删除，无法保存句子');
+        transaction.abort();
+        return;
+      }
+      store.put({ ...record, lrcText });
+    };
+    try {
+      await done;
+    } catch (error) {
+      throw conflict || error;
+    }
+  }
+
   /** 是否已导入某课。 */
   async function hasLesson(book, filename) {
     const store = await tx('readonly');
@@ -222,6 +249,19 @@
       }));
   }
 
+  async function listLrcFiles(book) {
+    if (!book) throw new Error('请选择需要导出的合集');
+    const store = await tx('readonly');
+    const records = await reqToPromise(store.index('book').getAll(book));
+    return records
+      .filter(record => record.book === book && typeof record.lrcText === 'string')
+      .map(record => ({
+        filename: record.lrcFilename || `${record.filename}.lrc`,
+        lrcText: record.lrcText
+      }))
+      .sort((a, b) => a.filename.localeCompare(b.filename, 'zh-Hans-CN', { numeric: true }));
+  }
+
   /** 已导入课程总数。 */
   async function count() {
     const store = await tx('readonly');
@@ -229,8 +269,11 @@
   }
 
   async function deleteLesson(book, filename) {
+    if (!book || !filename) throw new Error('请选择需要删除的课程');
     const store = await tx('readwrite');
-    await reqToPromise(store.delete(makeId(book, filename)));
+    const done = transactionDone(store.transaction);
+    store.delete(makeId(book, filename));
+    await done;
   }
 
   async function clearAll() {
@@ -260,8 +303,10 @@
   window.NCE_RESOURCES = {
     putLesson,
     getLesson,
+    updateLessonLrc,
     hasLesson,
     listLessons,
+    listLrcFiles,
     count,
     deleteLesson,
     clearAll,

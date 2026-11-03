@@ -2,12 +2,12 @@
   'use strict';
   const { escapeHTML } = NCEUtils;
 
-  function renderTabs(tabs, collections, current, busy) {
+  function renderTabs(tabs, collections, current, busy, { reorderable = true } = {}) {
     tabs.innerHTML = collections.length ? collections.map(collection => `
       <button type="button" class="collection-tab" role="tab"
         data-collection="${escapeHTML(collection.id)}"
         aria-selected="${collection.id === current}" tabindex="${collection.id === current ? 0 : -1}"
-        draggable="${!busy}" title="${escapeHTML(collection.name)}（拖动排序，或按 Alt + 左右方向键调整）"${busy ? ' disabled' : ''}>
+        draggable="${reorderable && !busy}" title="${escapeHTML(collection.name)}${reorderable ? '（拖动排序，或按 Alt + 左右方向键调整）' : ''}"${busy ? ' disabled' : ''}>
         ${escapeHTML(collection.name)}
       </button>`).join('') : '<span class="collection-placeholder">尚未创建合集</span>';
     const selected = tabs.querySelector('[aria-selected="true"]');

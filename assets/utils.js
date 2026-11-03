@@ -1,5 +1,5 @@
 /**
- * EchoFlow · utils.js · Shared pure-function utilities
+ * EchoFlow · utils.js · Shared utilities
  * UMD: browser exposes window.NCEUtils, Node.js uses module.exports
  */
 (function (root, factory) {
@@ -21,6 +21,35 @@
 
   function hasCJK(s) {
     return /[\u3400-\u9FFF\uF900-\uFAFF]/.test(s);
+  }
+
+  function parseLrcText(text) {
+    const lineRE = /^((?:\[\d+:\d+(?:\.\d+)?\])+)(.*)$/;
+    const metaRE = /^\[(al|ar|ti|by):(.+)\]$/i;
+    const rows = text.replace(/\r/g, '').split('\n');
+    const meta = { al: '', ar: '', ti: '', by: '' };
+    const items = [];
+    for (let i = 0; i < rows.length; i++) {
+      const raw = rows[i].trim(); if (!raw) continue;
+      const mm = raw.match(metaRE); if (mm) { meta[mm[1].toLowerCase()] = mm[2].trim(); continue; }
+      const m = raw.match(lineRE); if (!m) continue;
+      const rowStart = i;
+      const tags = m[1];
+      const start = timeTagsToSeconds(tags);
+      const body = m[2].trim();
+      let en = body, cn = '';
+      if (body.includes('|')) { const parts = body.split('|'); en = parts[0].trim(); cn = (parts[1] || '').trim(); }
+      else if (i + 1 < rows.length) {
+        const m2 = rows[i + 1].trim().match(lineRE);
+        if (m2 && m2[1] === tags) {
+          const text2 = m2[2].trim();
+          if (hasCJK(text2)) { cn = text2; i++; }
+        }
+      }
+      items.push({ start, en, cn, rowStart, rowEnd: i, tags });
+    }
+    for (let i = 0; i < items.length; i++) items[i].end = i + 1 < items.length ? items[i + 1].start : 0;
+    return { meta, items };
   }
 
   var KEY_DISPLAY_NAMES = {
@@ -62,6 +91,87 @@
       }
     }
     return null;
+  }
+
+  var SHORTCUTS_KEY = 'nce_shortcuts';
+  var DEFAULT_SHORTCUTS = {
+    playPause: { key: ' ', label: '播放 / 暂停', group: '播放控制' },
+    replay: { key: 'r', label: '重播当前句', group: '播放控制' },
+    prevSentence: { key: 'ArrowLeft', label: '上一句', group: '句子导航' },
+    nextSentence: { key: 'ArrowRight', label: '下一句', group: '句子导航' },
+    prevLesson: { key: 'Ctrl+ArrowLeft', label: '上一课', group: '课程导航' },
+    nextLesson: { key: 'Ctrl+ArrowRight', label: '下一课', group: '课程导航' },
+    volumeUp: { key: 'ArrowUp', label: '增加音量', group: '音量控制' },
+    volumeDown: { key: 'ArrowDown', label: '减少音量', group: '音量控制' },
+    toggleReveal: { key: 'v', label: '显示/隐藏当前句', group: '听读模式' },
+    editSentence: { key: 'e', label: '编辑当前句', group: '句子导航' }
+  };
+
+  function loadCustomShortcuts(storage) {
+    try {
+      var saved = storage.getItem(SHORTCUTS_KEY);
+      if (saved) {
+        var parsed = JSON.parse(saved);
+        var result = JSON.parse(JSON.stringify(DEFAULT_SHORTCUTS));
+        for (var action of Object.keys(result)) {
+          if (typeof parsed[action] === 'string' && parsed[action]) result[action].key = parsed[action];
+        }
+        for (var name of Object.keys(result)) {
+          if (findConflict(result, name, result[name].key)) {
+            console.warn('已保存的快捷键与新默认键位冲突，已恢复默认快捷键');
+            return JSON.parse(JSON.stringify(DEFAULT_SHORTCUTS));
+          }
+        }
+        return result;
+      }
+    } catch (error) {
+      console.warn('无法加载快捷键配置，使用默认快捷键', error);
+    }
+    return JSON.parse(JSON.stringify(DEFAULT_SHORTCUTS));
+  }
+
+  function matchesShortcut(event, action, shortcuts) {
+    var key = shortcuts[action]?.key;
+    return !!key && getShortcutKey(event)?.toLowerCase() === key.toLowerCase();
+  }
+
+  function loadPlaybackVolume(storage) {
+    try {
+      var saved = storage.getItem('nce_volume');
+      if (saved !== null) {
+        var volume = Number(saved);
+        if (saved.trim() && Number.isFinite(volume) && volume >= 0 && volume <= 1) return volume;
+        console.warn('已保存的音量无效，使用默认音量');
+      }
+    } catch (error) {
+      console.warn('无法恢复音量设置', error);
+    }
+    return 1;
+  }
+
+  function createVolumeToast(doc) {
+    var timer = 0;
+    return function (volume) {
+      var toast = doc.getElementById('volumeToast');
+      if (!toast) {
+        toast = doc.createElement('div');
+        toast.id = 'volumeToast';
+        toast.style.cssText = `
+          position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+          background: var(--surface); color: var(--text); border: 1px solid var(--border);
+          border-radius: var(--radius); padding: 20px 30px; box-shadow: var(--shadow);
+          z-index: 2000; backdrop-filter: saturate(120%) blur(10px);
+          font-size: 18px; font-weight: 500; min-width: 120px; text-align: center;
+          opacity: 0; transition: opacity 0.2s ease;
+        `;
+        toast.setAttribute('role', 'status');
+        doc.body.appendChild(toast);
+      }
+      toast.textContent = `音量 ${Math.round(volume * 100)}%`;
+      toast.style.opacity = '1';
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { toast.style.opacity = '0'; }, 1000);
+    };
   }
 
   function normalizeShadowRepeat(value) {
@@ -164,6 +274,7 @@
   }
 
   function clampRate(v) {
+    if (v == null || (typeof v === 'string' && !v.trim())) return 1.0;
     var n = Number(v);
     if (!Number.isFinite(n)) return 1.0;
     return Math.max(0.5, Math.min(2.5, n));
@@ -180,7 +291,7 @@
 
   function loopLabel(mode) {
     if (mode === 'one') return '循环：单句';
-    if (mode === 'all') return '循环：全清单';
+    if (mode === 'all') return '循环：当前分类';
     return '循环：关';
   }
 
@@ -239,10 +350,17 @@
   return {
     timeTagsToSeconds: timeTagsToSeconds,
     hasCJK: hasCJK,
+    parseLrcText: parseLrcText,
     KEY_DISPLAY_NAMES: KEY_DISPLAY_NAMES,
     getKeyDisplayName: getKeyDisplayName,
     getShortcutKey: getShortcutKey,
     findConflict: findConflict,
+    SHORTCUTS_KEY: SHORTCUTS_KEY,
+    DEFAULT_SHORTCUTS: DEFAULT_SHORTCUTS,
+    loadCustomShortcuts: loadCustomShortcuts,
+    matchesShortcut: matchesShortcut,
+    loadPlaybackVolume: loadPlaybackVolume,
+    createVolumeToast: createVolumeToast,
     normalizeShadowRepeat: normalizeShadowRepeat,
     normalizeAutoStopCount: normalizeAutoStopCount,
     shouldSkipLine: shouldSkipLine,

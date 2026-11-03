@@ -128,40 +128,45 @@ test('sync and local storage failures are surfaced to the caller', async () => {
   await assert.rejects(context.NCE_STORAGE.clearLearningHistory(), /Storage blocked/);
 });
 
-test('resource clearing waits for transaction commit and rejects aborted transactions', async () => {
-  for (const abort of [false, true]) {
-    const { context } = setup();
-    let transaction;
-    context.indexedDB = {
-      open() {
-        const request = {};
-        queueMicrotask(() => {
-          request.result = {
-            transaction() {
-              transaction = {
-                objectStore: () => ({ transaction, clear() {} })
-              };
-              return transaction;
-            }
-          };
-          request.onsuccess();
-        });
-        return request;
+test('resource clearing and single-lesson deletion wait for commit and reject aborted transactions', async () => {
+  for (const operation of ['clearAll', 'deleteLesson']) {
+    for (const abort of [false, true]) {
+      const { context } = setup();
+      let transaction;
+      context.indexedDB = {
+        open() {
+          const request = {};
+          queueMicrotask(() => {
+            request.result = {
+              transaction() {
+                transaction = {
+                  objectStore: () => ({
+                    transaction, clear() {},
+                    delete(id) { assert.equal(id, 'lib/one'); }
+                  })
+                };
+                return transaction;
+              }
+            };
+            request.onsuccess();
+          });
+          return request;
+        }
+      };
+      vm.runInContext(read('assets/resource-store.js'), context);
+      let settled = false;
+      const clearing = context.NCE_RESOURCES[operation]('lib', 'one');
+      clearing.then(() => { settled = true; }, () => { settled = true; });
+      await tick();
+      assert.equal(settled, false);
+      if (abort) {
+        transaction.onabort();
+        await assert.rejects(clearing, /事务已中止/);
+      } else {
+        transaction.oncomplete();
+        await clearing;
+        assert.equal(settled, true);
       }
-    };
-    vm.runInContext(read('assets/resource-store.js'), context);
-    let settled = false;
-    const clearing = context.NCE_RESOURCES.clearAll();
-    clearing.then(() => { settled = true; }, () => { settled = true; });
-    await tick();
-    assert.equal(settled, false);
-    if (abort) {
-      transaction.onabort();
-      await assert.rejects(clearing, /事务已中止/);
-    } else {
-      transaction.oncomplete();
-      await clearing;
-      assert.equal(settled, true);
     }
   }
 });
@@ -186,6 +191,9 @@ async function home({
       return collection;
     },
     listLessons: async book => lessons.filter(lesson => !book || lesson.book === book),
+    deleteLesson: async (book, filename) => {
+      lessons = lessons.filter(lesson => lesson.book !== book || lesson.filename !== filename);
+    },
     deleteCollection: async book => {
       lessons = lessons.filter(lesson => lesson.book !== book);
       collections = collections.filter(collection => collection.id !== book);
@@ -248,6 +256,256 @@ async function cleanup(get, accepted = true) {
   await get('clearCollectionDialog').close(accepted ? 'clear' : 'cancel');
   await pending;
 }
+
+function clickDelete(state, id = 'lib/one') {
+  const button = Object.assign(element(), { dataset: { id } });
+  const event = {
+    prevented: false, stopped: false,
+    target: { closest: selector => selector === '.lesson-delete-btn' ? button : null },
+    preventDefault() { this.prevented = true; },
+    stopPropagation() { this.stopped = true; }
+  };
+  const pending = state.get('lessons').dispatch('click', event);
+  return { button, event, pending };
+}
+
+async function deleteLesson(state, id = 'lib/one', accepted = true) {
+  const attempt = clickDelete(state, id);
+  assert.equal(state.get('deleteLessonDialog').open, true);
+  await state.get('deleteLessonDialog').close(accepted ? 'delete' : 'cancel');
+  await attempt.pending;
+  return attempt;
+}
+
+test('course cards replace lesson favorites with accessible delete buttons outside their navigation links', async () => {
+  const { get } = await home();
+  const html = get('lessonsGrid').innerHTML;
+  assert.doesNotMatch(html, /\bfav-btn\b|aria-pressed/);
+  assert.match(html, /class="lesson-card-link" href="lesson\.html#lib\/one"/);
+  assert.match(html, /<\/a>\s*<button class="lesson-delete-btn"/);
+  assert.match(html, /aria-label="删除课程：One"/);
+  assert.match(html, /title="删除课程"/);
+});
+
+test('delete icons appear on card hover or keyboard focus, remain touch-accessible and cannot be clicked invisibly', () => {
+  const css = read('assets/styles.css');
+  const base = css.match(/\.lesson-delete-btn \{([^}]+)\}/)[1];
+  assert.match(base, /opacity:\s*0;/);
+  assert.match(base, /pointer-events:\s*none;/);
+  assert.match(css, /\.lesson-item:hover \.lesson-delete-btn,\s*\.lesson-item:focus-within \.lesson-delete-btn \{\s*opacity:\s*1;\s*pointer-events:\s*auto;/);
+  assert.match(css, /@media \(hover: none\), \(pointer: coarse\) \{\s*\.lesson-delete-btn \{\s*opacity:\s*0\.6;\s*pointer-events:\s*auto;/);
+  assert.match(css, /\.lesson-item \.lesson-delete-btn:disabled \{[^}]*pointer-events:\s*none;/);
+});
+
+test('deletion confirmation escapes the title, prevents navigation and cancel leaves everything untouched', async () => {
+  const state = await home({
+    initialLessons: [{ id: 'lib/one', book: 'lib', filename: 'one', title: '<img src=x> & Title' }]
+  });
+  const { context, get } = state;
+  const preserved = seed(context);
+  const attempt = clickDelete(state);
+  assert.equal(attempt.event.prevented, true);
+  assert.equal(attempt.event.stopped, true);
+  assert.equal(get('deleteLessonName').textContent, '<img src=x> & Title');
+  assert.equal(get('deleteLessonName').innerHTML, '');
+  assert.equal(get('deleteLessonFilename').textContent, 'one');
+  assert.equal(get('deleteLessonCancel').focused, true);
+  assert.match(get('lessonsGrid').innerHTML, /&lt;img src=x&gt; &amp; Title/);
+  await get('deleteLessonDialog').close('cancel');
+  await attempt.pending;
+  assert.equal((await context.NCE_RESOURCES.listLessons()).length, 1);
+  assert.equal(context.localStorage.getItem('nce_lastpos'), '{"lib/one":{"t":5}}');
+  assert.equal(context.localStorage.getItem('nce_sentence_favs_v1'), preserved.nce_sentence_favs_v1);
+  assert.equal(get('clearLibraryBtn').disabled, false);
+  assert.equal(attempt.button.focused, true);
+});
+
+test('deleting the last course preserves its collection, favorites and settings but removes only its history', async () => {
+  const state = await home({ collections, initialLessons: twoLessons });
+  const { context, get } = state;
+  const preserved = seed(context);
+  context.localStorage.setItem('nce_recents', '[{"id":"lib/one"},{"id":"lib/one-more"},{"id":"book-two/one"}]');
+  context.localStorage.setItem('nce_lastpos', '{"lib/one":{"t":1},"lib/one-more":{"t":3},"book-two/one":{"t":2}}');
+  context.localStorage.setItem('nce_revealed_sentences', '{"lib/one":[0],"book-two/one":[1]}');
+  context.sessionStorage.setItem('nce_resume', 'lib/one');
+  await deleteLesson(state);
+  assert.deepEqual((await context.NCE_RESOURCES.listLessons()).map(lesson => lesson.id), ['book-two/one']);
+  assert.equal((await context.NCE_RESOURCES.listCollections()).length, 2);
+  assert.equal(get('collectionTabs').current, 'lib');
+  assert.equal(get('libraryToolbar').hidden, false);
+  assert.equal(get('libraryEmpty').hidden, false);
+  assert.equal(get('lessonsGrid').innerHTML, '');
+  assert.equal(get('lastSeenWrap').style.display, 'none');
+  assert.equal(get('importOpenBtn').focused, true);
+  assert.deepEqual(JSON.parse(context.localStorage.getItem('nce_recents')), [{ id: 'lib/one-more' }, { id: 'book-two/one' }]);
+  assert.deepEqual(JSON.parse(context.localStorage.getItem('nce_lastpos')), { 'lib/one-more': { t: 3 }, 'book-two/one': { t: 2 } });
+  assert.deepEqual(JSON.parse(context.localStorage.getItem('nce_revealed_sentences')), { 'book-two/one': [1] });
+  assert.equal(context.sessionStorage.getItem('nce_resume'), null);
+  for (const [key, value] of Object.entries(preserved)) assert.equal(context.localStorage.getItem(key), value, key);
+  assert.match(get('libraryStatus').textContent, /已删除课程「First book」.*句子收藏与设置已保留/);
+});
+
+test('single-course deletion keeps remaining cards and their natural ordering', async () => {
+  const state = await home({
+    initialLessons: [
+      { id: 'lib/10', book: 'lib', filename: '10', title: 'Ten' },
+      { id: 'lib/2', book: 'lib', filename: '2', title: 'Two' },
+      { id: 'lib/1', book: 'lib', filename: '1', title: 'One' }
+    ]
+  });
+  await deleteLesson(state, 'lib/2');
+  const html = state.get('lessonsGrid').innerHTML;
+  assert.doesNotMatch(html, /Two/);
+  assert.ok(html.indexOf('One') < html.indexOf('Ten'));
+  assert.equal(state.get('libraryCount').textContent, '2 课');
+});
+
+test('delete controls lock while pending and focus moves to a remaining course after deletion', async () => {
+  const state = await home({
+    initialLessons: [
+      { id: 'lib/one', book: 'lib', filename: 'one', title: 'One' },
+      { id: 'lib/two', book: 'lib', filename: 'two', title: 'Two' }
+    ]
+  });
+  const remaining = element();
+  state.get('lessonsGrid').querySelectorAll = () => [remaining];
+  const attempt = clickDelete(state);
+  assert.equal(remaining.disabled, true);
+  await state.get('deleteLessonDialog').close('delete');
+  await attempt.pending;
+  assert.equal(remaining.disabled, false);
+  assert.equal(remaining.focused, true);
+});
+
+test('single-course confirmation locks import, cleanup, export, switching and repeat deletion', async () => {
+  const state = await home({ collections, initialLessons: twoLessons });
+  const { context, get } = state;
+  const attempt = clickDelete(state);
+  for (const id of ['clearLibraryBtn', 'exportLrcBtn', 'importOpenBtn', 'createCollectionOpen']) {
+    assert.equal(get(id).disabled, true, id);
+  }
+  assert.ok(get('collectionTabs').buttons.every(tab => tab.disabled));
+  await clickDelete(state).pending;
+  await state.selectCollection('book-two');
+  await get('clearLibraryBtn').dispatch('click');
+  await get('exportLrcBtn').dispatch('click');
+  let imports = 0;
+  context.NCE_IMPORT.importFileList = async () => { imports++; };
+  get('importFilesInput').files = [{ name: 'one.mp3' }];
+  await get('importFilesInput').dispatch('change');
+  assert.equal(imports, 0);
+  assert.equal(get('deleteLessonDialog').showCount, 1);
+  assert.equal(get('clearCollectionDialog').open, false);
+  assert.equal(get('collectionTabs').current, 'lib');
+  await get('deleteLessonDialog').close('delete');
+  await attempt.pending;
+});
+
+test('resource deletion failure keeps the course and history and reports the error', async () => {
+  const state = await home();
+  const { context, get } = state;
+  seed(context);
+  context.NCE_RESOURCES.deleteLesson = async () => { throw new Error('Disk error'); };
+  const attempt = await deleteLesson(state);
+  assert.match(get('libraryStatus').textContent, /删除课程「One」失败：Disk error/);
+  assert.equal((await context.NCE_RESOURCES.listLessons()).length, 1);
+  assert.match(get('lessonsGrid').innerHTML, /One/);
+  assert.equal(context.localStorage.getItem('nce_lastpos'), '{"lib/one":{"t":5}}');
+  assert.equal(get('clearLibraryBtn').disabled, false);
+  assert.equal(attempt.button.focused, true);
+});
+
+test('history failure after resource deletion removes only that card and reports partial completion', async () => {
+  const state = await home({ collections, initialLessons: twoLessons });
+  state.context.NCE_STORAGE.clearLearningHistory = async () => { throw new Error('Sync unavailable'); };
+  await deleteLesson(state);
+  assert.equal(state.get('lessonsGrid').innerHTML, '');
+  assert.equal(state.get('collectionTabs').current, 'lib');
+  assert.equal((await state.context.NCE_RESOURCES.listCollections()).length, 2);
+  assert.match(state.get('libraryStatus').textContent, /已删除课程「First book」，但学习记录清理或同步未完成：Sync unavailable/);
+  assert.equal(state.get('importOpenBtn').disabled, false);
+});
+
+test('Escape cancellation resets the confirmation result even after an earlier confirmed deletion', async () => {
+  const state = await home({
+    initialLessons: [
+      { id: 'lib/one', book: 'lib', filename: 'one', title: 'One' },
+      { id: 'lib/two', book: 'lib', filename: 'two', title: 'Two' }
+    ]
+  });
+  await deleteLesson(state);
+  const attempt = clickDelete(state, 'lib/two');
+  assert.equal(state.get('deleteLessonDialog').returnValue, 'cancel');
+  await state.get('deleteLessonDialog').close();
+  await attempt.pending;
+  assert.equal((await state.context.NCE_RESOURCES.listLessons()).length, 1);
+  assert.match(state.get('lessonsGrid').innerHTML, /Two/);
+});
+
+test('dialog failures and stale delete buttons report errors without deleting another course', async () => {
+  const state = await home();
+  await clickDelete(state, 'lib/missing').pending;
+  assert.match(state.get('libraryStatus').textContent, /课程列表已变化/);
+  assert.equal(state.get('deleteLessonDialog').open, false);
+  state.get('deleteLessonDialog').showModal = () => { throw new Error('Dialog unavailable'); };
+  await clickDelete(state).pending;
+  assert.match(state.get('libraryStatus').textContent, /删除课程「One」失败：Dialog unavailable/);
+  assert.equal(state.get('clearLibraryBtn').disabled, false);
+  assert.equal((await state.context.NCE_RESOURCES.listLessons()).length, 1);
+});
+
+test('ZIP export button sits immediately left of import and excludes audio', () => {
+  const page = read('index.html');
+  assert.match(page, /id="exportLrcBtn"[^>]*>导出<\/button>\s*<button[^>]*id="importOpenBtn"/);
+});
+
+test('LRC export captures the current collection and locks import, cleanup and collection switching', async () => {
+  const state = await home({ collections, initialLessons: twoLessons });
+  const { context, get } = state;
+  let finish;
+  let target;
+  let calls = 0;
+  context.NCE_IMPORT.exportCollectionLrc = book => {
+    calls++;
+    target = book;
+    return new Promise(resolve => { finish = resolve; });
+  };
+  const exporting = get('exportLrcBtn').dispatch('click');
+  assert.equal(target, 'lib');
+  for (const id of ['exportLrcBtn', 'clearLibraryBtn', 'importOpenBtn', 'createCollectionOpen']) {
+    assert.equal(get(id).disabled, true, id);
+  }
+  await state.selectCollection('book-two');
+  await get('clearLibraryBtn').dispatch('click');
+  await get('exportLrcBtn').dispatch('click');
+  let imports = 0;
+  context.NCE_IMPORT.importFileList = async () => { imports++; };
+  get('importFilesInput').files = [{ name: 'one.lrc' }];
+  await get('importFilesInput').dispatch('change');
+  assert.equal(imports, 0);
+  assert.equal(calls, 1);
+  assert.equal(get('clearCollectionDialog').open, false);
+  assert.equal(get('collectionTabs').current, 'lib');
+  finish(3);
+  await exporting;
+  assert.equal(get('exportLrcBtn').disabled, false);
+  assert.equal(get('exportLrcBtn').textContent, '导出');
+  assert.match(get('libraryStatus').textContent, /第一本书.*LRC ZIP.*3 个字幕文件.*不含音频/);
+});
+
+test('export errors are visible and controls recover without changing or deleting resources', async () => {
+  const { context, get } = await home();
+  context.NCE_IMPORT.exportCollectionLrc = async () => { throw new Error('没有可导出的 LRC 字幕'); };
+  await get('exportLrcBtn').dispatch('click');
+  assert.match(get('libraryStatus').textContent, /导出字幕失败：没有可导出/);
+  assert.equal(get('exportLrcBtn').disabled, false);
+  assert.equal(get('clearLibraryBtn').disabled, false);
+  assert.equal((await context.NCE_RESOURCES.listLessons()).length, 1);
+  const empty = await home({ collections: [], initialLessons: [] });
+  assert.equal(empty.get('exportLrcBtn').disabled, true);
+  await empty.get('exportLrcBtn').dispatch('click');
+  assert.match(empty.get('libraryStatus').textContent, /请先创建并选择合集/);
+});
 
 test('canceling confirmation leaves resources and learning history untouched', async () => {
   const { context, get } = await home();
@@ -346,13 +604,16 @@ test('resource failure is visible and does not clear learning history', async ()
 });
 
 test('imports and cleanup cannot run concurrently', async () => {
-  const { context, get } = await home();
+  const state = await home();
+  const { context, get } = state;
   let finish;
   context.NCE_IMPORT.importFileList = () => new Promise(resolve => { finish = resolve; });
   get('importFilesInput').files = [{ name: 'one.mp3' }];
   await get('importFilesInput').dispatch('change');
   assert.equal(get('clearLibraryBtn').disabled, true);
   await get('clearLibraryBtn').dispatch('click');
+  await clickDelete(state).pending;
+  assert.equal(get('deleteLessonDialog').open, false);
   assert.equal((await context.NCE_RESOURCES.listLessons()).length, 1);
   finish({ imported: 1 });
   await tick();
@@ -515,4 +776,27 @@ test('scoped history sync retains progress in other collections', async () => {
   assert.deepEqual(uploaded.userData.nce_recents, [{ id: 'book-two/one' }]);
   assert.deepEqual(uploaded.userData.nce_lastpos, { 'book-two/one': { t: 2 } });
   assert.deepEqual(uploaded.userData.nce_revealed_sentences, {});
+});
+
+test('single-course history cleanup syncs exact IDs and preserves sibling progress and pending resume', async () => {
+  const { context } = setup();
+  seed(context);
+  context.localStorage.setItem('nce_recents', '[{"id":"lib/one"},{"id":"lib/one-more"},{"id":"lib/two"},{"id":"book-two/one"}]');
+  context.localStorage.setItem('nce_lastpos', '{"lib/one":{"t":1},"lib/one-more":{"t":2},"lib/two":{"t":3},"book-two/one":{"t":4}}');
+  context.sessionStorage.setItem('nce_resume', 'lib/two');
+  let uploaded;
+  context.fetch = async (url, options) => {
+    if (options.method === 'POST') uploaded = JSON.parse(options.body);
+    return { headers: new Headers({ 'x-nce-storage': '1' }), ok: true, status: 200, json: async () => ({}) };
+  };
+  await context.NCE_STORAGE.SYNC.pull();
+  await context.NCE_STORAGE.clearLearningHistory('lib', 'one');
+  assert.deepEqual(uploaded.userData.nce_recents, [{ id: 'lib/one-more' }, { id: 'lib/two' }, { id: 'book-two/one' }]);
+  assert.deepEqual(uploaded.userData.nce_lastpos, {
+    'lib/one-more': { t: 2 }, 'lib/two': { t: 3 }, 'book-two/one': { t: 4 }
+  });
+  assert.equal(context.sessionStorage.getItem('nce_resume'), 'lib/two');
+  assert.equal(uploaded.userData.nce_sentence_favs_v1[0].en, 'Hello');
+  assert.deepEqual(uploaded.userData.nce_favs, ['lib/one']);
+  await assert.rejects(context.NCE_STORAGE.clearLearningHistory(undefined, 'one'), /需要合集和文件名/);
 });

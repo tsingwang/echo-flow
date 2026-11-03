@@ -54,6 +54,23 @@ test('warm dark text, highlights and destructive buttons retain readable contras
   assert.ok(contrast(dark['switch-thumb'], dark['switch-active']) >= 3);
 });
 
+test('lesson sentence focus uses the active text-colored border without an outline or shadow', () => {
+  const focus = css.match(/body\.lesson-page \.sentence:focus\s*\{([^}]+)\}/);
+  assert.ok(focus, 'sentence focus is scoped to the lesson page');
+  assert.match(focus[1], /outline:\s*none\s*;/);
+  assert.match(focus[1], /border:\s*2px solid var\(--text\)\s*;/);
+  assert.match(focus[1], /padding:\s*19px\s*;/);
+  assert.match(focus[1], /box-shadow:\s*none\s*;/);
+  assert.match(focus[1], /transition:\s*background-color \.35s ease, color \.35s ease\s*;/,
+    'focus borders and shadows must not animate from the previous active style');
+  assert.ok(focus.index > css.indexOf('.sentence.listen-mode.revealed.active'),
+    'focus styling overrides active borders in both listen-mode states');
+  assert.match(css, /:focus-visible\s*\{\s*outline:\s*2px solid var\(--accent\)/,
+    'other controls retain their keyboard focus outline');
+  assert.match(css, /\.sentence\.active\s*\{\s*border:\s*2px solid var\(--text\)/,
+    'playback highlighting remains distinct without focus');
+});
+
 for (const page of ['index.html', 'lesson.html', 'favorites.html']) {
   test(`${page} uses the warm background before CSS loads and preserves theme switching`, () => {
     const scripts = [...read(page).matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map(match => match[1]);

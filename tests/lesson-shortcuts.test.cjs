@@ -13,6 +13,7 @@ function setup(saved = {}) {
   const played = [];
   const notices = [];
   const navigation = [];
+  const edited = [];
   const elements = new Map();
   const timers = new Map();
   let nextTimer = 0;
@@ -24,9 +25,11 @@ function setup(saved = {}) {
     },
     console: { warn: message => notices.push(message) },
     document: {
+      activeElement: {},
       addEventListener: (type, handler) => { handlers[type] = handler; },
       getElementById: id => elements.get(id),
-      createElement: () => ({ style: {}, textContent: '' }),
+      querySelector: () => null,
+      createElement: () => ({ style: {}, textContent: '', setAttribute() {} }),
       body: { appendChild: element => elements.set(element.id, element) }
     },
     setTimeout: callback => { timers.set(++nextTimer, callback); return nextTimer; },
@@ -44,7 +47,10 @@ function setup(saved = {}) {
     shadowStartIndex: 1, firstContentIndex: 0,
     prevLessonHref: 'lesson.html#lib/one', nextLessonHref: 'lesson.html#lib/three',
     shortcutsPanel: { hidden: true },
+    openShortcuts: () => { context.shortcutsPanel.hidden = false; },
+    closeShortcuts: () => { context.shortcutsPanel.hidden = true; },
     playSegment: index => played.push(index),
+    openSentenceEditor: index => edited.push(index),
     showNotification: message => notices.push(message)
   });
   vm.runInContext(read('assets/utils.js'), context);
@@ -54,7 +60,7 @@ function setup(saved = {}) {
     source.indexOf('  // 主流程')
   ), context);
   vm.runInContext(source.slice(
-    source.indexOf('    audio.volume = 1;'),
+    source.indexOf('    audio.volume = NCEUtils.loadPlaybackVolume'),
     source.indexOf("    const backLink =")
   ), context);
   vm.runInContext(source.slice(
@@ -62,16 +68,114 @@ function setup(saved = {}) {
     source.indexOf('    // 返回')
   ), context);
   vm.runInContext(source.slice(
-    source.indexOf('    let volumeToastTimer ='),
+    source.indexOf('    const showVolumeToast ='),
     source.indexOf("    const settingsReset =")
   ), context);
-  function press(key, target = {}, modifiers = {}) {
+  function press(key, target = context.document.activeElement, modifiers = {}) {
     let prevented = false;
     handlers.keydown({ key, target, ...modifiers, preventDefault() { prevented = true; } });
     return prevented;
   }
-  return { context, handlers, values, played, notices, navigation, elements, timers, press };
+  return { context, handlers, values, played, edited, notices, navigation, elements, timers, press };
 }
+
+test('E edits the focused sentence or the current sentence, and supports custom keys', () => {
+  const { press, edited, context } = setup();
+  assert.equal(press('e'), true);
+  assert.deepEqual(edited, [1]);
+  press('e', { closest: () => ({ dataset: { idx: '2' } }) });
+  assert.deepEqual(edited, [1, 2]);
+  press('e', {}, { repeat: true });
+  press('e', { tagName: 'INPUT' });
+  assert.deepEqual(edited, [1, 2]);
+  context.idx = -1;
+  press('e');
+  assert.deepEqual(edited, [1, 2]);
+  const custom = setup({ nce_shortcuts: JSON.stringify({ editSentence: 'j' }) });
+  assert.equal(custom.press('e'), false);
+  assert.equal(custom.press('j'), true);
+  assert.deepEqual(custom.edited, [1]);
+});
+
+test('sentence navigation moves stale sentence focus so E edits the new sentence', () => {
+  for (const saved of [{}, {
+    nce_shortcuts: JSON.stringify({ prevSentence: 'h', nextSentence: 'l', editSentence: 'j' })
+  }]) {
+    const { context, press, played, edited } = setup(saved);
+    const sentences = context.items.map((_, index) => ({
+      dataset: { idx: String(index) },
+      closest() { return this; },
+      focus(options) {
+        assert.equal(options.preventScroll, true);
+        context.document.activeElement = this;
+      }
+    }));
+    context.listEl = {
+      querySelector: selector => sentences.find(sentence =>
+        selector === `.sentence[data-idx="${sentence.dataset.idx}"]`)
+    };
+    context.playSegment = index => { played.push(index); context.idx = index; };
+    context.document.activeElement = {
+      closest: () => sentences[1]
+    };
+    const [left, right, edit] = saved.nce_shortcuts ? ['h', 'l', 'j'] : ['ArrowLeft', 'ArrowRight', 'e'];
+    for (const key of [right, left, left, left, right]) {
+      press(key);
+      press(edit);
+    }
+    assert.deepEqual(played, [2, 1, 0, 0, 1]);
+    assert.deepEqual(edited, played);
+    assert.equal(context.document.activeElement, sentences[1]);
+  }
+});
+
+test('E follows sentence navigation even before asynchronous playback updates its index', () => {
+  const { context, press, edited } = setup();
+  const destination = {
+    dataset: { idx: '2' },
+    closest() { return this; },
+    focus() { context.document.activeElement = this; }
+  };
+  context.listEl = { querySelector: () => destination };
+  context.document.activeElement = { closest: () => ({ dataset: { idx: '1' } }) };
+  press('ArrowRight');
+  assert.equal(context.idx, 1);
+  press('e');
+  assert.deepEqual(edited, [2]);
+});
+
+test('sentence navigation does not steal focus from controls outside the sentence list', () => {
+  const { context, press, played } = setup();
+  const control = { tagName: 'BUTTON', closest: () => null };
+  context.document.activeElement = control;
+  press('ArrowRight');
+  assert.deepEqual(played, [2]);
+  assert.equal(context.document.activeElement, control);
+});
+
+test('dialogs, search, composition and handled keys suppress player and editor shortcuts', () => {
+  const { context, press, played, edited, navigation } = setup();
+  context.document.querySelector = () => ({ hidden: false });
+  for (const key of ['e', ' ', 'ArrowRight', 'ArrowUp', '?']) press(key);
+  press('ArrowRight', {}, { ctrlKey: true });
+  context.document.querySelector = () => null;
+  press('e', {}, { isComposing: true });
+  press('ArrowRight', {}, { defaultPrevented: true });
+  assert.deepEqual(played, []);
+  assert.deepEqual(edited, []);
+  assert.deepEqual(navigation, []);
+});
+
+test('question mark still toggles the shortcut help while its dialog blocks playback', () => {
+  const { context, press, played } = setup();
+  assert.equal(press('?'), true);
+  assert.equal(context.shortcutsPanel.hidden, false);
+  context.document.querySelector = () => context.shortcutsPanel;
+  assert.equal(press('ArrowRight'), false);
+  assert.deepEqual(played, []);
+  assert.equal(press('?'), true);
+  assert.equal(context.shortcutsPanel.hidden, true);
+});
 
 test('left/right select sentences without changing volume or navigating lessons', () => {
   const { context, played, press } = setup();
@@ -259,4 +363,75 @@ test('shortcut capture records combinations, ignores modifier-only presses and d
   assert.equal(reloaded.context.location.href, 'lesson.html#lib/three');
   capture('Escape');
   assert.equal(context.cancelled, true);
+});
+
+test('lesson back link distinguishes favorite-source entry from home and unknown sources', () => {
+  for (const from of [undefined, 'favorites', 'index', 'https://example.com']) {
+    const state = setup();
+    const attributes = new Map();
+    const label = { textContent: '首页' };
+    let click;
+    state.context.book = 'book 中文';
+    state.context.queryParams = { from };
+    state.context.qs = selector => selector === '#backLinkLabel' ? label : null;
+    state.context.backLink = {
+      setAttribute: (name, value) => attributes.set(name, value),
+      addEventListener(type, handler) { if (type === 'click') click = handler; }
+    };
+    vm.runInContext(source.slice(
+      source.indexOf('    // 返回'),
+      source.indexOf('    // 自定义播放器控制')
+    ), state.context);
+    const favoriteSource = from === 'favorites';
+    const destination = favoriteSource ? 'favorites.html' : `index.html#${encodeURIComponent('book 中文')}`;
+    assert.equal(label.textContent, favoriteSource ? '返回' : '首页');
+    assert.equal(attributes.get('aria-label'), favoriteSource ? '返回收藏' : '首页');
+    assert.equal(attributes.get('title'), attributes.get('aria-label'));
+    assert.equal(attributes.get('href'), destination);
+    let prevented = false;
+    click({ preventDefault() { prevented = true; } });
+    assert.equal(prevented, true);
+    assert.equal(state.context.location.href, destination);
+    assert.deepEqual(state.navigation, ['save', 'clear-shadow', 'pause']);
+  }
+  assert.match(read('lesson.html'), /id="backLinkLabel">首页<\/span>/);
+});
+
+test('neighbor navigation and automatic next lesson preserve favorite origin without changing the HTML cache URL', async () => {
+  for (const from of [undefined, 'favorites']) {
+    const state = setup();
+    const context = state.context;
+    Object.assign(context, {
+      book: 'lib', base: 'two', queryParams: { from },
+      prevLessonLink: { style: {} }, nextLessonLink: { style: {} },
+      getLibrary: async () => [{ filename: 'one' }, { filename: 'two' }, { filename: 'three' }],
+      getNextLesson: async () => ({ filename: 'three', title: 'Third' }),
+      sessionStorage: { setItem() {} }, LASTPOS_KEY: 'nce_lastpos'
+    });
+    context.window = context;
+    vm.runInContext(source.slice(
+      source.indexOf('    function lessonHref('),
+      source.indexOf('    const inModern =')
+    ), context);
+    vm.runInContext(source.slice(
+      source.indexOf('    async function resolveLessonNeighbors()'),
+      source.indexOf('    // 启动：')
+    ), context);
+    vm.runInContext(source.slice(
+      source.indexOf('    async function autoNextLesson()'),
+      source.indexOf('    async function resolveLessonNeighbors()')
+    ), context);
+    const suffix = from === 'favorites' ? '?from=favorites' : '';
+    await context.resolveLessonNeighbors();
+    assert.equal(context.prevLessonHref, `lesson.html#lib/one${suffix}`);
+    assert.equal(context.nextLessonHref, `lesson.html#lib/three${suffix}`);
+    assert.equal(context.prevLessonLink.href, context.prevLessonHref);
+    assert.equal(context.nextLessonLink.href, context.nextLessonHref);
+    const url = new URL(context.nextLessonHref, 'https://app.example/');
+    assert.equal(url.search, '');
+    assert.equal(url.pathname, '/lesson.html');
+    await context.autoNextLesson();
+    [...state.timers.values()].at(-1)();
+    assert.equal(context.location.href, `lesson.html#lib/three${suffix}`);
+  }
 });
