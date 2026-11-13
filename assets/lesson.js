@@ -60,6 +60,41 @@
     return rows.join('\n');
   }
 
+  function restructureLrcSentence(text, index, mode, drafts, duration) {
+    const sentences = parseLrcText(text).items;
+    const sentence = sentences[index];
+    if (!sentence) throw new Error('句子不存在，请刷新后重试');
+    if (mode === 'merge' && index === 0) throw new Error('首句不能合并到上一句');
+    if (mode !== 'merge' && mode !== 'split') throw new Error('未知句子操作');
+    const first = mode === 'merge' ? index - 1 : index;
+    validateSentenceTimestamp(Math.round(drafts[0].start * 1000), first, sentences, duration);
+    if (mode === 'merge' && drafts[0].start !== sentences[first].start) {
+      throw new Error('合并须保留上一句开始时间');
+    }
+    if (mode === 'split') {
+      const end = index + 1 < sentences.length ? sentences[index + 1].start : duration;
+      if (!Number.isFinite(end) || drafts[1].start <= drafts[0].start || drafts[1].start >= end) {
+        throw new Error('拆分时间须在本句开始和结束之间');
+      }
+      validateSentenceTimestamp(Math.round(drafts[1].start * 1000), index, sentences, duration);
+      if (!drafts[0].en.trim() || !drafts[1].en.trim()) throw new Error('请填写前后两句的英文内容');
+    }
+    const rows = text.split('\n');
+    const ending = rows[sentences[first].rowStart].endsWith('\r') ? '\r' : '';
+    const lines = drafts.map((draft, i) => {
+      const edited = editLrcSentence(text, first, draft);
+      const line = edited.split('\n')[sentences[first].rowStart];
+      // Extra time tags belong to the original sentence, not the new second half.
+      return i === 0 ? line : line.replace(/^((?:\[\d+:\d+(?:\.\d+)?\])+)/,
+        `[${formatSentenceTimestamp(draft.start)}]`).replace(/\r?$/, ending);
+    });
+    if (mode === 'merge') {
+      rows.splice(sentence.rowStart, sentence.rowEnd - sentence.rowStart + 1);
+    }
+    rows.splice(sentences[first].rowStart, sentences[first].rowEnd - sentences[first].rowStart + 1, ...lines);
+    return rows.join('\n');
+  }
+
   // 从 IndexedDB（用户导入的资源）取 lrc 文本并解析。
   async function loadLrcFromStore(book, filename) {
     const store = window.NCE_RESOURCES;
@@ -1534,12 +1569,202 @@
     let editingSentenceIndex = -1;
     let savingSentence = false;
     let sentenceEditorFocus = null;
+    let sentenceOperation = 'edit';
+    let sentenceDraftBeforeOperation = null;
+    let sentenceCut = 0;
+    let sentencePreviewFrame = 0;
+    let sentencePreviewSeq = 0;
+    let sentencePreviewEnd = 0;
+    function sentenceDraft() {
+      return {
+        start: parseSentenceTimestamp(sentenceEditorTime.value) / 1000,
+        en: sentenceEditorEn.value.trim(), cn: sentenceEditorCn.value.trim()
+      };
+    }
+    function sentenceEditorEnd() {
+      return editingSentenceIndex + 1 < items.length ? items[editingSentenceIndex + 1].start : audio.duration;
+    }
+    function stopSentencePreview() {
+      ++sentencePreviewSeq;
+      if (sentencePreviewFrame) cancelAnimationFrame(sentencePreviewFrame);
+      sentencePreviewFrame = 0;
+      sentencePreviewEnd = 0;
+      if (!audio.paused) pauseForNavigation();
+      qs('#sentenceEditorPlay').textContent = '试听本句';
+    }
+    function updateSentencePreviewPosition(time, updateCut = true) {
+      qs('#sentenceEditorSeek').value = String(time);
+      qs('#sentenceEditorPosition').textContent = formatSentenceTimestamp(time);
+      if (updateCut && sentenceOperation === 'chooseSplit') qs('#sentenceEditorCut').value = formatSentenceTimestamp(time);
+    }
+    async function playSentencePreview(part = 'all') {
+      if (savingSentence) return;
+      if (!audio.paused) { stopSentencePreview(); return; }
+      const seq = ++sentencePreviewSeq;
+      const playbackSeq = playSeq;
+      try {
+        await ensureMetadata();
+        if (seq !== sentencePreviewSeq || editingSentenceIndex < 0) return;
+        updateSentenceOperationUI();
+        const draft = sentenceDraft();
+        if (part !== 'all') {
+          sentenceCut = readSentenceCut();
+          updateSentenceOperationUI();
+        }
+        const start = part === 'second' ? sentenceCut : draft.start;
+        const end = part === 'first' ? sentenceCut : sentenceEditorEnd();
+        if (!Number.isFinite(end) || end <= start) throw new Error('音频尚未就绪或试听范围无效');
+        validateSentenceTimestamp(Math.round(draft.start * 1000),
+          sentenceOperation === 'merge' ? editingSentenceIndex - 1 : editingSentenceIndex, items, audio.duration);
+        const position = Number(qs('#sentenceEditorSeek').value);
+        sentencePreviewEnd = end;
+        audio.currentTime = part === 'all' && position >= start && position < end ? position : start;
+        await audio.play();
+        if (seq !== sentencePreviewSeq) {
+          if (playSeq === playbackSeq) pauseForNavigation();
+          return;
+        }
+        qs('#sentenceEditorPlay').textContent = '暂停试听';
+        const tick = () => {
+          if (seq !== sentencePreviewSeq) return;
+          updateSentencePreviewPosition(Math.min(audio.currentTime, end), part === 'all');
+          if (audio.paused || audio.currentTime >= end) { stopSentencePreview(); return; }
+          sentencePreviewFrame = requestAnimationFrame(tick);
+        };
+        tick();
+      } catch (error) {
+        if (seq !== sentencePreviewSeq) return;
+        stopSentencePreview();
+        console.error('试听句子失败', error);
+        showSentenceEditorError(error);
+      }
+    }
+    function updateSentenceOperationUI() {
+      const edit = sentenceOperation === 'edit';
+      const split = sentenceOperation === 'split';
+      qs('#sentenceEditorActions').hidden = !edit;
+      qs('#sentenceEditorSplitPoint').hidden = sentenceOperation !== 'chooseSplit' && !split;
+      qs('#sentenceEditorCutDone').hidden = split;
+      qs('#sentenceEditorSecond').hidden = !split;
+      qs('#sentenceEditorFirstTitle').hidden = !split;
+      qs('#sentenceEditorCancel').hidden = edit;
+      qs('#sentenceEditorOperation').hidden = sentenceOperation !== 'merge';
+      qs('#sentenceEditorMerge').disabled = editingSentenceIndex === 0;
+      sentenceEditorTime.disabled = !edit;
+      qs('#sentenceEditorDec').disabled = !edit;
+      qs('#sentenceEditorInc').disabled = !edit;
+      qs('#sentenceEditorDone').disabled = sentenceOperation === 'chooseSplit';
+      qs('#sentenceEditorDone').textContent = sentenceOperation === 'merge' ? '保存合并' :
+        split ? '保存拆分' : '保存并关闭';
+      qs('#sentenceEditorClose').setAttribute('aria-label', edit ? '保存并关闭' : '取消操作');
+      qs('#sentenceEditorHint').textContent = edit ?
+        '每次微调 100ms。关闭、按 Esc 或点击遮罩时保存到当前浏览器，不修改原始文件。' :
+        '仅点击保存才生效。关闭、按 Esc 或点击遮罩将取消操作，返回原编辑状态。';
+      qs('#sentenceEditorSeek').min = String(parseSentenceTimestamp(sentenceEditorTime.value) / 1000);
+      qs('#sentenceEditorSeek').max = String(sentenceEditorEnd());
+      qs('#sentenceEditorSeek').disabled = !Number.isFinite(sentenceEditorEnd());
+    }
+    function beginSentenceOperation(mode) {
+      if (savingSentence || sentenceOperation !== 'edit') return;
+      try {
+        const draft = sentenceDraft();
+        validateSentenceTimestamp(Math.round(draft.start * 1000), editingSentenceIndex, items, audio.duration);
+        if (mode === 'merge' && editingSentenceIndex === 0) throw new Error('首句不能合并到上一句');
+        if (mode === 'chooseSplit' && (!Number.isFinite(sentenceEditorEnd()) ||
+          sentenceEditorEnd() - draft.start <= 0.002)) throw new Error('请等待音频就绪，且本句须有可拆分的时长');
+        stopSentencePreview();
+        sentenceDraftBeforeOperation = draft;
+        sentenceOperation = mode;
+        sentenceEditorError.hidden = true;
+        if (mode === 'merge') {
+          const previous = items[editingSentenceIndex - 1];
+          sentenceEditorTime.value = formatSentenceTimestamp(previous.start);
+          sentenceEditorEn.value = [previous.en, draft.en].filter(Boolean).join(' ');
+          sentenceEditorCn.value = [previous.cn, draft.cn].filter(Boolean).join(' ');
+          qs('#sentenceEditorOperation').textContent =
+            `第 ${editingSentenceIndex}、${editingSentenceIndex + 1} 句将合并，播放范围包含两句。`;
+          updateSentencePreviewPosition(previous.start);
+        } else {
+          const position = Number(qs('#sentenceEditorSeek').value);
+          sentenceCut = position > draft.start && position < sentenceEditorEnd() ?
+            position : Math.round((draft.start + sentenceEditorEnd()) * 500) / 1000;
+          qs('#sentenceEditorCut').value = formatSentenceTimestamp(sentenceCut);
+          updateSentencePreviewPosition(sentenceCut);
+        }
+        updateSentenceOperationUI();
+      } catch (error) { showSentenceEditorError(error); }
+    }
+    function readSentenceCut(delta = 0) {
+      const ms = parseSentenceTimestamp(qs('#sentenceEditorCut').value) + delta;
+      if (ms / 1000 <= sentenceDraftBeforeOperation.start || ms / 1000 >= sentenceEditorEnd()) {
+        throw new Error('拆分时间须在本句开始和结束之间');
+      }
+      return ms / 1000;
+    }
+    function confirmSentenceCut(delta = null) {
+      if (savingSentence || !['chooseSplit', 'split'].includes(sentenceOperation)) return;
+      try {
+        const cut = readSentenceCut(delta || 0);
+        stopSentencePreview();
+        sentenceCut = cut;
+        qs('#sentenceEditorCut').value = formatSentenceTimestamp(cut);
+        updateSentencePreviewPosition(sentenceCut);
+        sentenceEditorError.hidden = true;
+        if (delta !== null || sentenceOperation === 'split') {
+          updateSentenceOperationUI();
+          return;
+        }
+        const en = sentenceEditorEn.value;
+        const cursor = sentenceEditorEn.selectionStart;
+        // A cursor at an edge has no usable split; keep the original text for manual allocation.
+        if (cursor > 0 && cursor < en.length) {
+          sentenceEditorEn.value = en.slice(0, cursor).trim();
+          qs('#sentenceEditorSecondEn').value = en.slice(cursor).trim();
+        } else qs('#sentenceEditorSecondEn').value = '';
+        qs('#sentenceEditorSecondCn').value = '';
+        sentenceOperation = 'split';
+        updateSentenceOperationUI();
+        qs('#sentenceEditorSecondEn').focus();
+      } catch (error) { showSentenceEditorError(error); }
+    }
+    function cancelSentenceOperation() {
+      if (savingSentence || sentenceOperation === 'edit') return;
+      stopSentencePreview();
+      const draft = sentenceDraftBeforeOperation;
+      sentenceEditorTime.value = formatSentenceTimestamp(draft.start);
+      sentenceEditorEn.value = draft.en;
+      sentenceEditorCn.value = draft.cn;
+      sentenceOperation = 'edit';
+      sentenceEditorError.hidden = true;
+      updateSentencePreviewPosition(draft.start);
+      updateSentenceOperationUI();
+      qs(editingSentenceIndex === 0 ? '#sentenceEditorSplit' : '#sentenceEditorMerge').focus();
+    }
+    function refreshEditedSentenceFavorites(index, operation) {
+      const prefix = `${book}/${base}::`;
+      const seen = new Set();
+      sentenceFavs = sentenceFavs.flatMap(favorite => {
+        if (!favorite.id.startsWith(prefix)) return [favorite];
+        const oldIndex = Number(favorite.id.slice(prefix.length));
+        if (operation === 'edit' && oldIndex !== index) return [favorite];
+        const nextIndex = operation === 'merge' ? (oldIndex >= index ? oldIndex - 1 : oldIndex) :
+          operation === 'split' ? (oldIndex > index ? oldIndex + 1 : oldIndex) : oldIndex;
+        const sentence = items[nextIndex];
+        if (!sentence) return [favorite];
+        const id = sentenceFavId(nextIndex);
+        if (seen.has(id)) return [];
+        seen.add(id);
+        return [{ ...favorite, id, idx: nextIndex, start: sentence.start, en: sentence.en, cn: sentence.cn }];
+      });
+      sentenceFavSet = new Set(sentenceFavs.map(favorite => favorite.id));
+      saveSentenceFavs(sentenceFavs);
+    }
     function showSentenceEditorError(error) {
       sentenceEditorError.textContent = error.message || String(error);
       sentenceEditorError.hidden = false;
     }
     function openSentenceEditor(index) {
-      if (!sentenceEditorPanel || !sentenceEditorPanel.hidden || !items[index]) return;
+      if (savingSentence || !sentenceEditorPanel || !sentenceEditorPanel.hidden || !items[index]) return;
       sentenceEditorFocus = document.activeElement;
       editingSentenceIndex = index;
       ++playSeq;
@@ -1553,6 +1778,9 @@
       sentenceEditorTime.value = formatSentenceTimestamp(items[index].start);
       sentenceEditorEn.value = items[index].en;
       sentenceEditorCn.value = items[index].cn;
+      sentenceOperation = 'edit';
+      updateSentencePreviewPosition(items[index].start);
+      updateSentenceOperationUI();
       sentenceEditorError.hidden = true;
       qs('#sentenceEditorTitle').textContent = `编辑第 ${index + 1} 句`;
       qs('#sentenceEditorRange').textContent =
@@ -1575,6 +1803,7 @@
         const ms = parseSentenceTimestamp(sentenceEditorTime.value) + delta;
         validateSentenceTimestamp(ms, editingSentenceIndex, items, audio.duration);
         sentenceEditorTime.value = formatSentenceTimestamp(ms / 1000);
+        updateSentenceOperationUI();
         sentenceEditorError.hidden = true;
       } catch (error) {
         showSentenceEditorError(error);
@@ -1583,14 +1812,23 @@
     async function closeSentenceEditor() {
       if (savingSentence || editingSentenceIndex < 0) return;
       const index = editingSentenceIndex;
+      const operation = sentenceOperation;
+      if (operation === 'chooseSplit') return;
+      stopSentencePreview();
       let nextText;
       try {
         const ms = parseSentenceTimestamp(sentenceEditorTime.value);
-        validateSentenceTimestamp(ms, index, items, audio.duration);
+        validateSentenceTimestamp(ms, operation === 'merge' ? index - 1 : index, items, audio.duration);
         const original = items[index];
-        const draft = { start: ms / 1000, en: sentenceEditorEn.value.trim(), cn: sentenceEditorCn.value.trim() };
-        nextText = draft.start === original.start && draft.en === original.en && draft.cn === original.cn ?
-          lessonLrcText : editLrcSentence(lessonLrcText, index, draft);
+        const draft = sentenceDraft();
+        if (operation === 'split') sentenceCut = readSentenceCut();
+        nextText = operation === 'edit' ?
+          (draft.start === original.start && draft.en === original.en && draft.cn === original.cn ?
+            lessonLrcText : editLrcSentence(lessonLrcText, index, draft)) :
+          restructureLrcSentence(lessonLrcText, index, operation, [draft, ...(operation === 'split' ? [{
+            start: sentenceCut, en: qs('#sentenceEditorSecondEn').value.trim(),
+            cn: qs('#sentenceEditorSecondCn').value.trim()
+          }] : [])], audio.duration);
       } catch (error) {
         showSentenceEditorError(error);
         return;
@@ -1608,16 +1846,22 @@
           adjustLastEndIfPossible();
           firstContentIndex = skipIntro ? findFirstContentIndex(items) : 0;
           shadowStartIndex = findFirstContentIndex(items, { skipQuestions: true });
-          idx = index;
-          segmentEnd = endFor(items[index]);
-          const favorite = sentenceFavs.find(item => item.id === sentenceFavId(index));
-          if (favorite) {
-            Object.assign(favorite, { start: items[index].start, en: items[index].en, cn: items[index].cn });
-            saveSentenceFavs(sentenceFavs);
+          idx = operation === 'merge' ? index - 1 : index;
+          segmentEnd = endFor(items[idx]);
+          refreshEditedSentenceFavorites(index, operation);
+          if (operation !== 'edit') {
+            const mapIndex = i => operation === 'merge' ?
+              (i >= index ? i - 1 : i) : (i > index ? i + 1 : i);
+            revealedSentences = new Set([...revealedSentences].map(mapIndex));
+            saveRevealedSentences();
           }
           render();
           highlight(idx, false);
-          showNotification('句子已保存');
+          if (operation !== 'edit') {
+            audio.currentTime = items[idx].start;
+            saveLastPos(true);
+          }
+          if (operation === 'edit') showNotification('句子已保存');
         }
       } catch (error) {
         console.error('保存句子失败', error);
@@ -1627,6 +1871,7 @@
         savingSentence = false;
         controls.forEach(control => control.disabled = false);
         sentenceEditorPanel.removeAttribute('aria-busy');
+        updateSentenceOperationUI();
       }
       editingSentenceIndex = -1;
       disableTrap();
@@ -1637,15 +1882,30 @@
       sentenceEditorPanel.hidden = true;
       document.body.style.overflow = '';
       const focus = sentenceEditorFocus && sentenceEditorFocus.isConnected ? sentenceEditorFocus :
-        listEl.querySelector(`.sentence[data-idx="${index}"]`);
+        listEl.querySelector(`.sentence[data-idx="${idx}"]`);
       if (focus) focus.focus({ preventScroll: true });
     }
     if (sentenceEditorOverlay) {
-      sentenceEditorOverlay.addEventListener('click', closeSentenceEditor);
-      qs('#sentenceEditorClose').addEventListener('click', closeSentenceEditor);
+      const dismiss = () => sentenceOperation === 'edit' ? closeSentenceEditor() : cancelSentenceOperation();
+      sentenceEditorOverlay.addEventListener('click', dismiss);
+      qs('#sentenceEditorClose').addEventListener('click', dismiss);
       qs('#sentenceEditorDone').addEventListener('click', closeSentenceEditor);
       qs('#sentenceEditorDec').addEventListener('click', () => stepSentenceTimestamp(-100));
       qs('#sentenceEditorInc').addEventListener('click', () => stepSentenceTimestamp(100));
+      qs('#sentenceEditorMerge').addEventListener('click', () => beginSentenceOperation('merge'));
+      qs('#sentenceEditorSplit').addEventListener('click', () => beginSentenceOperation('chooseSplit'));
+      qs('#sentenceEditorCancel').addEventListener('click', cancelSentenceOperation);
+      qs('#sentenceEditorCutDone').addEventListener('click', () => confirmSentenceCut());
+      qs('#sentenceEditorCutDec').addEventListener('click', () => confirmSentenceCut(-100));
+      qs('#sentenceEditorCutInc').addEventListener('click', () => confirmSentenceCut(100));
+      qs('#sentenceEditorCut').addEventListener('change', () => confirmSentenceCut(0));
+      qs('#sentenceEditorPlay').addEventListener('click', () => playSentencePreview());
+      qs('#sentenceEditorPlayFirst').addEventListener('click', () => playSentencePreview('first'));
+      qs('#sentenceEditorPlaySecond').addEventListener('click', () => playSentencePreview('second'));
+      qs('#sentenceEditorSeek').addEventListener('input', () => {
+        stopSentencePreview();
+        updateSentencePreviewPosition(Number(qs('#sentenceEditorSeek').value));
+      });
     }
 
     // Escape 键处理
@@ -1654,7 +1914,8 @@
       if (e.key === 'Escape') {
         if (sentenceEditorPanel && !sentenceEditorPanel.hidden) {
           e.preventDefault();
-          closeSentenceEditor();
+          if (sentenceOperation === 'edit') closeSentenceEditor();
+          else cancelSentenceOperation();
           return;
         }
         const dataConfirm = document.getElementById('dataConfirmOverlay');
@@ -1989,6 +2250,7 @@
 
     function scheduleAdvance() {
       clearAdvance(); isScheduling = false; scheduleTime = 0;
+      if (sentenceEditorPanel && !sentenceEditorPanel.hidden) return;
       if (audio.paused) return;
       // 连读模式或听读模式（非单句循环）下不做逐句调度，避免 iOS 在边界 seek 造成的卡顿
       if (readMode === 'continuous' || (readMode === 'listen' && afterPlay !== 'single')) return;
@@ -2486,7 +2748,10 @@
     // --------------------------
     let lastUpdateTime = 0;
     audio.addEventListener('timeupdate', () => {
-      if (sentenceEditorPanel && !sentenceEditorPanel.hidden) return;
+      if (sentenceEditorPanel && !sentenceEditorPanel.hidden) {
+        if (sentencePreviewEnd > 0 && audio.currentTime >= sentencePreviewEnd) stopSentencePreview();
+        return;
+      }
       const t = audio.currentTime;
       // 点读模式或听读模式（单句循环）安全网：如果 scheduleAdvance 失效，这里兜底暂停
       if (readMode === 'shadow' && segmentEnd && t >= segmentEnd && !audio.paused) {
@@ -2543,6 +2808,7 @@
 
     // 整体结束
     audio.addEventListener('ended', () => {
+      if (sentenceEditorPanel && !sentenceEditorPanel.hidden) return;
       // 整篇循环：从第一句正文重新开始（连读/听读模式）
       if ((readMode === 'continuous' || readMode === 'listen' || readMode === 'shadow') && afterPlay === 'all' && items.length > 0) {
         setTimeout(() => {

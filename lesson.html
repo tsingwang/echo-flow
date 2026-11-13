@@ -624,14 +624,46 @@
         <button id="sentenceEditorInc" class="stepper-btn" aria-label="增加 100 毫秒">+</button>
       </div>
       <p id="sentenceEditorRange" class="muted"></p>
+      <div class="sentence-editor-preview">
+        <button id="sentenceEditorPlay" class="secondary-btn" type="button">试听本句</button>
+        <input id="sentenceEditorSeek" type="range" step="0.001" aria-label="本句试听位置">
+        <output id="sentenceEditorPosition">00:00.000</output>
+      </div>
+      <div id="sentenceEditorActions" class="sentence-editor-actions">
+        <button id="sentenceEditorMerge" class="secondary-btn" type="button">合并到上一句</button>
+        <button id="sentenceEditorSplit" class="secondary-btn" type="button">拆分当前句</button>
+      </div>
+      <div id="sentenceEditorSplitPoint" hidden>
+        <label for="sentenceEditorCut">拆分时间（分:秒.毫秒）</label>
+        <div class="sentence-editor-timestamp">
+          <button id="sentenceEditorCutDec" class="stepper-btn" aria-label="拆分时间减少 100 毫秒">−</button>
+          <input id="sentenceEditorCut" type="text" autocomplete="off" spellcheck="false">
+          <button id="sentenceEditorCutInc" class="stepper-btn" aria-label="拆分时间增加 100 毫秒">+</button>
+        </div>
+        <div class="sentence-editor-actions sentence-editor-split-actions">
+          <button id="sentenceEditorCutDone" class="secondary-btn" type="button">在此处拆分</button>
+          <button id="sentenceEditorPlayFirst" class="secondary-btn" type="button">试听前半句</button>
+          <button id="sentenceEditorPlaySecond" class="secondary-btn" type="button">试听后半句</button>
+        </div>
+      </div>
+      <p id="sentenceEditorOperation" class="muted" role="status" hidden></p>
+      <h3 id="sentenceEditorFirstTitle" hidden>前半句</h3>
       <label for="sentenceEditorEn">英文句子</label>
       <textarea id="sentenceEditorEn" rows="3"></textarea>
       <label for="sentenceEditorCn">中文翻译</label>
       <textarea id="sentenceEditorCn" rows="3"></textarea>
+      <div id="sentenceEditorSecond" class="sentence-editor-second" hidden>
+        <h3>后半句</h3>
+        <label for="sentenceEditorSecondEn">英文句子</label>
+        <textarea id="sentenceEditorSecondEn" rows="3"></textarea>
+        <label for="sentenceEditorSecondCn">中文翻译</label>
+        <textarea id="sentenceEditorSecondCn" rows="3"></textarea>
+      </div>
       <p id="sentenceEditorHint" class="muted">每次微调 100ms。关闭、按 Esc 或点击遮罩时保存到当前浏览器，不修改原始文件。</p>
       <p id="sentenceEditorError" role="alert" hidden></p>
     </div>
     <div class="settings-footer-modern">
+      <button id="sentenceEditorCancel" class="secondary-btn" hidden>取消操作</button>
       <button id="sentenceEditorDone" class="primary-btn">保存并关闭</button>
     </div>
   </div>

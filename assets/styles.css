@@ -1660,6 +1660,66 @@ body,
   padding-left: 10px;
 }
 
+.sentence-editor-preview,
+.sentence-editor-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.sentence-editor-fields .secondary-btn,
+#sentenceEditorCancel {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.sentence-editor-fields button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sentence-editor-split-actions {
+  flex-wrap: nowrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.sentence-editor-split-actions .secondary-btn {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 6px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.sentence-editor-preview input[type="range"] {
+  flex: 1;
+  min-width: 100px;
+  padding: 0;
+}
+
+.sentence-editor-preview output {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sentence-editor-second:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sentence-editor-fields h3 {
+  margin: 6px 0;
+  font-size: 15px;
+}
+
 /* Header */
 .settings-header {
   display: flex;

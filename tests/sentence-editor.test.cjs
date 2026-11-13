@@ -105,9 +105,12 @@ function editor() {
       getElementById: () => null
     },
     requestAnimationFrame: callback => frames.push(callback),
+    cancelAnimationFrame() {},
     qs: selector => element(selector.slice(1)),
     book: 'book-one', base: 'example',
-    audio: { duration: 10, paused: false },
+    audio: { duration: 10, currentTime: 0, paused: false,
+      async play() { this.paused = false; } },
+    ensureMetadata: async () => {},
     playSeq: 0, loopReplayPending: true, idx: 1, segmentEnd: 6,
     _trapRoot: null, skipIntro: false, firstContentIndex: 0, shadowStartIndex: 0,
     _lastEndAdjusted: false,
@@ -123,6 +126,9 @@ function editor() {
     findFirstContentIndex: () => 0,
     sentenceFavId: index => `book-one/example::${index}`,
     saveSentenceFavs: items => favorites.push(structuredClone(items)),
+    saveLastPos() {},
+    revealedSentences: new Set(),
+    saveRevealedSentences() {},
     render() { context.renders = (context.renders || 0) + 1; },
     showNotification: message => notices.push(message),
     window: { NCE_RESOURCES: { updateLessonLrc: (...args) => write(...args) } }
@@ -137,6 +143,7 @@ function editor() {
   return {
     context, elements, notices, saved, favorites, element,
     open: index => { context.openSentenceEditor(index); frames.splice(0).forEach(callback => callback()); },
+    tick: () => frames.splice(0).forEach(callback => callback()),
     close: () => context.closeSentenceEditor(),
     setWrite: callback => { write = callback; },
     escape: () => events.get('keydown')({ key: 'Escape', preventDefault() {} })
@@ -292,6 +299,234 @@ test('opening the editor prevents pending metadata seeks and automatic loops fro
   assert.equal(schedules, 0);
   await context.playSegment(0, { manual: false });
   assert.equal(schedules, 0);
+});
+
+test('merge removes only the current sentence rows and preserves metadata, comments and CRLF', () => {
+  const { restructureLrcSentence, parseLrcText } = helpers();
+  const input = '[ti:Example]\r\n[00:01.00]One\r\n[00:01.00]一\r\n' +
+    '# keep this comment\r\n[00:03.20]Two | 二\r\n[00:06.00]Three\r\n';
+  const output = restructureLrcSentence(input, 1, 'merge',
+    [{ start: 1, en: 'One Two', cn: '一 二' }], 10);
+  assert.equal(output, '[ti:Example]\r\n[00:01.000]One Two | 一 二\r\n' +
+    '# keep this comment\r\n[00:06.00]Three\r\n');
+  assert.equal(parseLrcText(output).items[0].end, 6);
+  assert.throws(() => restructureLrcSentence(input, 0, 'merge', [{ start: 1, en: 'One', cn: '' }], 10), /首句/);
+  assert.throws(() => restructureLrcSentence(input, 1, 'merge', [{ start: 2, en: 'One Two', cn: '' }], 10), /保留/);
+});
+
+test('split preserves original tags on the first half and validates endpoints, text and last sentence duration', () => {
+  const { restructureLrcSentence: split, parseLrcText } = helpers();
+  const input = '[ti:Example]\r\n[00:01.00][00:20.00]One two | 一二\r\n[00:06.00]Three\r\n';
+  const drafts = [{ start: 1, en: 'One', cn: '一' }, { start: 3.123, en: 'two', cn: '二' }];
+  const output = split(input, 0, 'split', drafts, 10);
+  assert.equal(output, '[ti:Example]\r\n[00:01.000][00:20.00]One | 一\r\n' +
+    '[00:03.123]two | 二\r\n[00:06.00]Three\r\n');
+  assert.equal(parseLrcText(output).items[0].end, 3.123);
+  for (const start of [1, 6, NaN]) {
+    assert.throws(() => split(input, 0, 'split', [drafts[0], { ...drafts[1], start }], 10), /时间/);
+  }
+  for (const en of ['', 'line\nbreak', 'pipe|separator']) {
+    assert.throws(() => split(input, 0, 'split', [drafts[0], { ...drafts[1], en }], 10), /内容|一行/);
+  }
+  assert.throws(() => split(original, 2, 'split',
+    [{ start: 6, en: 'Three', cn: '' }, { start: 8, en: 'more', cn: '' }], NaN), /时间/);
+  assert.equal(parseLrcText(split(original, 2, 'split',
+    [{ start: 6, en: 'Three', cn: '' }, { start: 8, en: 'more', cn: '' }], 10)).items.length, 4);
+});
+
+test('merge previews unsaved edits, cancels on Escape and saves only on explicit confirmation', async () => {
+  const fixture = editor();
+  const { context, element } = fixture;
+  fixture.open(1);
+  element('sentenceEditorEn').value = 'Edited two';
+  element('sentenceEditorMerge').click();
+  assert.equal(element('sentenceEditorEn').value, 'One Edited two');
+  assert.equal(element('sentenceEditorTime').value, '00:01.001');
+  assert.equal(element('sentenceEditorTime').disabled, true);
+  assert.equal(element('sentenceEditorDone').textContent, '保存合并');
+  fixture.escape();
+  assert.equal(element('sentenceEditorPanel').hidden, false);
+  assert.equal(element('sentenceEditorEn').value, 'Edited two');
+  assert.equal(fixture.saved.length, 0);
+  element('sentenceEditorMerge').click();
+  await element('sentenceEditorDone').click();
+  assert.equal(context.items.length, 2);
+  assert.equal(context.items[0].en, 'One Edited two');
+  assert.equal(context.items[0].end, 6);
+  assert.equal(context.idx, 0);
+  assert.deepEqual(fixture.notices, []);
+  assert.equal(context.sentenceFavs[0].id, 'book-one/example::0');
+});
+
+test('split uses the selected timestamp and English cursor, requires both halves and supports cancellation', async () => {
+  const fixture = editor();
+  const { context, element } = fixture;
+  fixture.open(1);
+  element('sentenceEditorEn').value = 'Two parts';
+  element('sentenceEditorEn').selectionStart = 0;
+  element('sentenceEditorSeek').value = '4.5';
+  element('sentenceEditorSplit').click();
+  assert.equal(element('sentenceEditorCut').value, '00:04.500');
+  assert.equal(element('sentenceEditorOperation').hidden, true);
+  assert.equal(element('sentenceEditorDone').disabled, true);
+  element('sentenceEditorCutInc').click();
+  assert.equal(element('sentenceEditorCut').value, '00:04.600');
+  element('sentenceEditorEn').selectionStart = 4;
+  element('sentenceEditorCutDone').click();
+  assert.equal(element('sentenceEditorOperation').hidden, true);
+  assert.equal(element('sentenceEditorEn').value, 'Two');
+  assert.equal(element('sentenceEditorSecondEn').value, 'parts');
+  assert.equal(element('sentenceEditorSecondCn').value, '');
+  element('sentenceEditorCancel').click();
+  assert.equal(element('sentenceEditorEn').value, 'Two parts');
+  element('sentenceEditorSplit').click();
+  element('sentenceEditorCutDone').click();
+  element('sentenceEditorSecondEn').value = '';
+  await fixture.close();
+  assert.equal(fixture.saved.length, 0);
+  assert.match(element('sentenceEditorError').textContent, /前后两句/);
+  element('sentenceEditorSecondEn').value = 'parts';
+  element('sentenceEditorSecondCn').value = '部分';
+  await fixture.close();
+  assert.equal(context.items.length, 4);
+  assert.equal(context.items[1].end, 4.6);
+  assert.equal(context.items[2].start, 4.6);
+  assert.equal(context.items[2].en, 'parts');
+  assert.equal(element('sentenceEditorPanel').hidden, true);
+});
+
+test('structural edits remap later favorites and revealed indices without post-save notices', async () => {
+  for (const mode of ['merge', 'split']) {
+    const fixture = editor();
+    const { context, element } = fixture;
+    context.sentenceFavs.push(
+      { id: 'book-one/example::0', idx: 0, start: 1.001, en: 'One', cn: '一' },
+      { id: 'book-one/example::2', idx: 2, start: 6, en: 'Three', cn: '' },
+      { id: 'other/lesson::0', en: 'Other', cn: '' }
+    );
+    context.revealedSentences = new Set([1, 2]);
+    fixture.open(1);
+    if (mode === 'merge') element('sentenceEditorMerge').click();
+    else {
+      element('sentenceEditorSplit').click();
+      element('sentenceEditorCutDone').click();
+      element('sentenceEditorSecondEn').value = 'New half';
+    }
+    await fixture.close();
+    assert.equal(context.sentenceFavs.find(item => item.en === 'Three').idx, mode === 'merge' ? 1 : 3);
+    assert.deepEqual([...context.revealedSentences], mode === 'merge' ? [0, 1] : [1, 3]);
+    assert.equal(context.sentenceFavs.filter(item => item.id === 'book-one/example::0').length, 1);
+    assert.equal(element('sentenceEditorPanel').hidden, true);
+    assert.deepEqual(fixture.notices, []);
+    assert.equal(context.sentenceFavs.find(item => item.id === 'other/lesson::0').en, 'Other');
+  }
+});
+
+test('split time stays adjustable beside half previews without repartitioning edited text', async () => {
+  const fixture = editor();
+  const { context, element } = fixture;
+  fixture.open(1);
+  element('sentenceEditorSplit').click();
+  element('sentenceEditorCutDone').click();
+  element('sentenceEditorEn').value = 'Edited first';
+  element('sentenceEditorCn').value = '前半句';
+  element('sentenceEditorSecondEn').value = 'Edited second';
+  element('sentenceEditorSecondCn').value = '后半句';
+  assert.equal(element('sentenceEditorSplitPoint').hidden, false);
+  assert.equal(element('sentenceEditorCutDone').hidden, true);
+  await element('sentenceEditorPlayFirst').click();
+  assert.equal(context.audio.currentTime, 3.2);
+  element('sentenceEditorCutInc').click();
+  assert.equal(context.audio.paused, true);
+  assert.equal(element('sentenceEditorCut').value, '00:04.700');
+  await element('sentenceEditorPlaySecond').click();
+  assert.equal(context.audio.currentTime, 4.7);
+  element('sentenceEditorCut').value = '00:05.200';
+  element('sentenceEditorCut').change();
+  assert.equal(context.audio.paused, true);
+  await element('sentenceEditorPlayFirst').click();
+  context.audio.currentTime = 5.2;
+  fixture.tick();
+  assert.equal(context.audio.paused, true);
+  assert.equal(element('sentenceEditorCut').value, '00:05.200');
+  // Saving also validates typed input that has not emitted a change event.
+  element('sentenceEditorCut').value = '00:05.300';
+  await fixture.close();
+  assert.equal(context.items[1].end, 5.3);
+  assert.equal(context.items[2].start, 5.3);
+  assert.equal(context.items[1].en, 'Edited first');
+  assert.equal(context.items[1].cn, '前半句');
+  assert.equal(context.items[2].en, 'Edited second');
+  assert.equal(context.items[2].cn, '后半句');
+});
+
+test('half previews preserve the chosen split time before text partition and reject invalid adjustments', async () => {
+  const fixture = editor();
+  const { context, element } = fixture;
+  fixture.open(1);
+  element('sentenceEditorSplit').click();
+  await element('sentenceEditorPlayFirst').click();
+  context.audio.currentTime = 4.6;
+  fixture.tick();
+  assert.equal(context.audio.paused, true);
+  assert.equal(element('sentenceEditorCut').value, '00:04.600');
+  await element('sentenceEditorPlaySecond').click();
+  assert.equal(context.audio.currentTime, 4.6);
+  context.audio.currentTime = 5.1;
+  fixture.tick();
+  assert.equal(element('sentenceEditorCut').value, '00:04.600');
+  element('sentenceEditorCutDone').click();
+  element('sentenceEditorSecondEn').value = 'Second';
+  for (const value of ['00:03.200', '00:06.000', 'bad']) {
+    element('sentenceEditorCut').value = value;
+    element('sentenceEditorCut').change();
+    await fixture.close();
+    assert.equal(element('sentenceEditorError').hidden, false);
+    assert.equal(element('sentenceEditorPanel').hidden, false);
+    assert.equal(context.lessonLrcText, original);
+    assert.equal(fixture.saved.length, 0);
+  }
+  element('sentenceEditorCut').value = '00:04.800';
+  element('sentenceEditorCutDec').click();
+  assert.equal(element('sentenceEditorError').hidden, true);
+  assert.equal(element('sentenceEditorCut').value, '00:04.700');
+  assert.equal(element('sentenceEditorSecondEn').value, 'Second');
+});
+
+test('failed structural saves leave data intact and allow retry', async () => {
+  const fixture = editor();
+  const { context, element } = fixture;
+  fixture.open(1);
+  element('sentenceEditorMerge').click();
+  fixture.setWrite(async () => { throw new Error('stale LRC'); });
+  await fixture.close();
+  assert.equal(context.lessonLrcText, original);
+  assert.equal(element('sentenceEditorPanel').hidden, false);
+  assert.equal(element('sentenceEditorTime').disabled, true);
+  assert.equal(element('sentenceEditorDone').disabled, false);
+  fixture.setWrite(async () => {});
+  await fixture.close();
+  assert.equal(context.items.length, 2);
+  assert.equal(element('sentenceEditorPanel').hidden, true);
+});
+
+test('preview stops at the sentence boundary and cancellation prevents a pending preview from starting', async () => {
+  const fixture = editor();
+  const { context, element } = fixture;
+  fixture.open(1);
+  await element('sentenceEditorPlay').click();
+  assert.equal(context.audio.paused, false);
+  context.audio.currentTime = 6;
+  fixture.tick();
+  assert.equal(context.audio.paused, true);
+  let ready;
+  context.ensureMetadata = () => new Promise(resolve => { ready = resolve; });
+  const pending = element('sentenceEditorPlay').click();
+  await fixture.close();
+  ready();
+  await pending;
+  assert.equal(context.audio.paused, true);
+  assert.equal(element('sentenceEditorPanel').hidden, true);
 });
 
 test('rendering edited sentences escapes markup and preserves keyboard focus targets', () => {
